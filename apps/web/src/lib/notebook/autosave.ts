@@ -7,8 +7,10 @@
  *
  * - Saves never overlap: if the document changes while a save is in flight,
  *   one more save runs after it finishes, with the latest state.
- * - A failed save is retried with backoff until it succeeds or the autosave
- *   is disposed, so an edit isn't lost because the API restarted.
+ * - A failed save is retried with backoff (1 s doubling to 30 s), so an edit
+ *   isn't lost because the API restarted. Errors that retrying can't fix
+ *   (see `isPermanentError`) stop the retries; the next edit or flush() tries
+ *   again.
  * - Attach it only after the stored snapshot has been applied to the doc.
  *   Otherwise an early save would upload a near-empty document over the
  *   stored one.
@@ -27,6 +29,12 @@ export interface AutosaveOptions {
   save: (state: Uint8Array) => Promise<void>;
   debounceMs?: number;
   onStatus?: (status: SaveStatus, error?: unknown) => void;
+  /**
+   * Errors that retrying can't fix (e.g. the notebook was deleted, or the
+   * snapshot is too large). These stop the automatic retries; the status
+   * stays "error", and the next edit or flush() tries again.
+   */
+  isPermanentError?: (error: unknown) => boolean;
 }
 
 export interface Autosave {
@@ -41,7 +49,7 @@ export interface Autosave {
 }
 
 export function attachAutosave(doc: Y.Doc, options: AutosaveOptions): Autosave {
-  const { save, debounceMs = 1000, onStatus } = options;
+  const { save, debounceMs = 1000, onStatus, isPermanentError = () => false } = options;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let retryDelay = RETRY_INITIAL_MS;
   let dirty = false;
@@ -71,8 +79,10 @@ export function attachAutosave(doc: Y.Doc, options: AutosaveOptions): Autosave {
           dirty = true;
           lastError = error;
           onStatus?.("error", error);
-          if (!disposed) schedule(retryDelay);
-          retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
+          if (!disposed && !isPermanentError(error)) {
+            schedule(retryDelay);
+            retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
+          }
           return;
         }
         lastError = null;

@@ -12,6 +12,9 @@ import { loadEnvFile } from "./src/lib/load-env-file";
 loadEnvFile(path.resolve(import.meta.dirname, "../../.env"));
 
 const nextConfig: NextConfig = {
+  // The e2e tests build into their own directory (see playwright.config.ts),
+  // so their build (pointing at a test API port) never replaces the normal one.
+  distDir: process.env.NEXT_DIST_DIR ?? ".next",
   turbopack: {
     rules: {
       // Tailwind v4's Turbopack loader (from create-next-app), used in place of

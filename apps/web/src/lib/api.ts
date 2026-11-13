@@ -102,9 +102,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
     const url = `${base()}${path}`;
     let response: Response;
     try {
+      const timeout = AbortSignal.timeout(timeoutMs);
       response = await fetchImpl(url, {
         ...rest,
-        signal: rest.signal ?? AbortSignal.timeout(timeoutMs),
+        // The caller's signal (to cancel) and the timeout both apply.
+        signal: rest.signal ? AbortSignal.any([rest.signal, timeout]) : timeout,
       });
     } catch (error) {
       throw toTransportError(error);
@@ -175,11 +177,27 @@ export function createApiClient(options: ApiClientOptions = {}) {
         body: state as BodyInit,
       });
     },
-    async runCell(notebookId: string, cellId: string, sql: string): Promise<Run> {
+    /**
+     * Runs a cell. Aborting `signal` only stops waiting for the response: the
+     * server keeps running the query (holding one of its workers) and stores
+     * the run. So the UI never aborts to start another run; it aborts only
+     * when the page goes away.
+     */
+    async runCell(
+      notebookId: string,
+      cellId: string,
+      sql: string,
+      signal?: AbortSignal,
+    ): Promise<Run> {
       const path = `/notebooks/${encodeURIComponent(notebookId)}/cells/${encodeURIComponent(cellId)}/runs`;
       return json(
         runSchema,
-        await request(path, { method: "POST", ...jsonBody({ sql }), timeoutMs: RUN_TIMEOUT_MS }),
+        await request(path, {
+          method: "POST",
+          ...jsonBody({ sql }),
+          timeoutMs: RUN_TIMEOUT_MS,
+          signal,
+        }),
       );
     },
     async getRun(notebookId: string, runId: string): Promise<Run> {

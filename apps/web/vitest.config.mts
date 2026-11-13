@@ -9,6 +9,7 @@ export default defineConfig({
   },
   test: {
     include: ["src/**/*.test.{ts,tsx}"],
+    // e2e/ holds Playwright tests, run with `pnpm e2e`.
     // Pure-logic tests by default; component tests opt into jsdom per file.
     environment: "node",
   },

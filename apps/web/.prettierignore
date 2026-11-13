@@ -2,3 +2,4 @@
 node_modules
 next-env.d.ts
 AGENTS.md
+.next-e2e

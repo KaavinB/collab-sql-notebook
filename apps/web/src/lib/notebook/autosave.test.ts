@@ -84,6 +84,25 @@ describe("autosave", () => {
     expect(statuses.at(-1)).toBe("saved");
   });
 
+  it("does not retry errors that retrying can't fix", async () => {
+    const save = vi.fn<(state: Uint8Array) => Promise<void>>().mockRejectedValue(new Error("gone"));
+    const doc = new Y.Doc();
+    const statuses: SaveStatus[] = [];
+    attachAutosave(doc, {
+      save,
+      debounceMs: 500,
+      onStatus: (s) => statuses.push(s),
+      isPermanentError: (e) => e instanceof Error && e.message === "gone",
+    });
+    doc.getText("t").insert(0, "a");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(statuses.at(-1)).toBe("error");
+    doc.getText("t").insert(0, "b"); // a new edit tries again
+    await vi.advanceTimersByTimeAsync(500);
+    expect(save).toHaveBeenCalledTimes(2);
+  });
+
   it("flush rejects while the latest state can't be saved", async () => {
     const save = vi.fn<(state: Uint8Array) => Promise<void>>().mockRejectedValue(new Error("down"));
     const { type, autosave } = setup(save);
