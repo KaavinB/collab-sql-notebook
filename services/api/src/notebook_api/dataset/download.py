@@ -55,6 +55,7 @@ def ensure_file(file: DatasetFile, raw_dir: Path, fetch: Fetcher = https_fetch) 
         target.unlink()
 
     # Random suffix so two concurrent runs never write the same partial file.
+    # Keep this pattern in sync with stale_partial_files().
     partial = target.with_name(f".{target.name}.{secrets.token_hex(8)}.part")
     try:
         fetch(file.url, partial)
@@ -67,3 +68,11 @@ def ensure_file(file: DatasetFile, raw_dir: Path, fetch: Fetcher = https_fetch) 
     finally:
         partial.unlink(missing_ok=True)
     return target
+
+
+def stale_partial_files(raw_dir: Path) -> list[Path]:
+    """Partial downloads left behind by a killed run.
+
+    Only safe to delete while holding the ingest lock (see cli.ingest_lock).
+    """
+    return sorted(raw_dir.glob(".*.part"))

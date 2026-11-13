@@ -11,12 +11,21 @@ ALLOWED = "http://localhost:3000"
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Tests may run under `uv run --env-file`; don't let a developer's .env leak in.
-    for name in ("API_HOST", "API_PORT", "API_RELOAD", "API_CORS_ORIGINS"):
+    for name in (
+        "API_HOST",
+        "API_PORT",
+        "API_RELOAD",
+        "API_CORS_ORIGINS",
+        "API_ALLOWED_HOSTS",
+        "DUCKDB_PATH",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
 def _client() -> TestClient:
-    return TestClient(create_app(Settings(api_cors_origins=[ALLOWED])))
+    # TestClient sends Host: testserver.
+    settings = Settings(api_cors_origins=[ALLOWED], api_allowed_hosts=["testserver"])
+    return TestClient(create_app(settings))
 
 
 def test_health_returns_ok() -> None:
@@ -77,3 +86,23 @@ def test_defaults_are_safe_for_production() -> None:
 def test_reload_is_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("API_RELOAD", "true")
     assert Settings().api_reload is True
+
+
+def test_unknown_host_header_is_rejected() -> None:
+    # DNS rebinding: a hostile page resolves its own domain to 127.0.0.1.
+    response = _client().get("/health", headers={"Host": "evil.example"})
+    assert response.status_code == 400
+
+
+def test_default_allowed_hosts_are_local_only() -> None:
+    assert Settings().api_allowed_hosts == ["127.0.0.1", "localhost"]
+
+
+def test_allowed_hosts_parse_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("API_ALLOWED_HOSTS", "api.example.com, localhost")
+    assert Settings().api_allowed_hosts == ["api.example.com", "localhost"]
+
+
+def test_process_memory_cap_must_exceed_duckdb_limit() -> None:
+    with pytest.raises(ValidationError, match="QUERY_PROCESS_MEMORY_CAP_MB"):
+        Settings(query_memory_limit_mb=1024, query_process_memory_cap_mb=1024)

@@ -37,3 +37,30 @@ def write_zones_csv(path: Path) -> Path:
         '236,"Manhattan","Upper East Side North","Yellow Zone"\n'
     )
     return path
+
+
+def write_query_test_db(path: Path) -> Path:
+    """A small database for query tests: numbers plus one row of many types."""
+    with duckdb.connect(str(path)) as con:
+        con.execute("CREATE TABLE nums AS SELECT range AS i FROM range(10000)")
+        con.execute(
+            """
+            CREATE TABLE types AS SELECT
+                1::INTEGER AS int_col,
+                9007199254740993::BIGINT AS big_col,
+                1.5::DOUBLE AS float_col,
+                'nan'::DOUBLE AS nan_col,
+                12.34::DECIMAL(10, 2) AS decimal_col,
+                'hello' AS text_col,
+                NULL::VARCHAR AS null_col,
+                TRUE AS bool_col,
+                DATE '2024-01-02' AS date_col,
+                TIMESTAMP '2024-01-02 03:04:05' AS ts_col,
+                INTERVAL 90 MINUTE AS interval_col,
+                [1, 2] AS list_col,
+                {'a': 1} AS struct_col,
+                MAP {1: 'x'} AS map_col,
+                '\\x01\\xff'::BLOB AS blob_col
+            """
+        )
+    return path

@@ -7,6 +7,9 @@ dependencies = [
     "duckdb>=2.0.0",
     "fastapi>=0.162.5",
     "pydantic-settings>=2.16.2",
+    # DuckDB needs pytz to return TIMESTAMP WITH TIME ZONE values to Python.
+    "pytz>=2026.6",
+    "sqlglot>=30.31.0",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -24,6 +27,7 @@ dev = [
     "mypy>=2.4.1",
     "pytest>=9.2.0",
     "ruff>=0.17.5",
+    "types-pytz>=2026.6.0.20261031",
 ]
 
 [tool.ruff]
@@ -37,7 +41,8 @@ select = ["E", "F", "I", "B", "UP", "S", "ASYNC", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 # assert is how pytest checks things.
-"tests/**" = ["S101"]
+# S608: tests build SQL strings on purpose (fixtures, large-query inputs).
+"tests/**" = ["S101", "S608"]
 
 [tool.mypy]
 strict = true

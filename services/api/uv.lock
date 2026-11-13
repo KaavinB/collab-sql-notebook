@@ -406,6 +406,8 @@ dependencies = [
     { name = "duckdb" },
     { name = "fastapi" },
     { name = "pydantic-settings" },
+    { name = "pytz" },
+    { name = "sqlglot" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -415,6 +417,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "types-pytz" },
 ]
 
 [package.metadata]
@@ -422,6 +425,8 @@ requires-dist = [
     { name = "duckdb", specifier = ">=2.0.0" },
     { name = "fastapi", specifier = ">=0.162.5" },
     { name = "pydantic-settings", specifier = ">=2.16.2" },
+    { name = "pytz", specifier = ">=2026.6" },
+    { name = "sqlglot", specifier = ">=30.31.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
 ]
 
@@ -431,6 +436,7 @@ dev = [
     { name = "mypy", specifier = ">=2.4.1" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "ruff", specifier = ">=0.17.5" },
+    { name = "types-pytz", specifier = ">=2026.6.0.20261031" },
 ]
 
 [[package]]
@@ -609,6 +615,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pytz"
+version = "2026.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/b0/168030b0bfcc334cf09fa3313afdb888d892c8a0027324683d1de0ec277e/pytz-2026.6.tar.gz", hash = "sha256:3b0fc2727707663d6e517936f444fd8a8b240f1fc32f4bf7ee03274245945284", size = 318520, upload-time = "2026-10-29T09:05:47.011Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/25/564f3fc5b70c1398d706c51f2b1470d0ea0b1b2f96fee67877b6f5bdf3b6/pytz-2026.6-py2.py3-none-any.whl", hash = "sha256:7fed3fee8fd6bd4a2b7b75a8d56021d0624127bf69bd5691f115db929ac570b3", size = 506321, upload-time = "2026-10-29T09:05:45.14Z" },
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -660,6 +675,15 @@ wheels = [
 ]
 
 [[package]]
+name = "sqlglot"
+version = "30.31.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/de/aa6cc05536bec18c7ad7d3def4d724d1d7086cbc9e96dc1e39fdaf83965d/sqlglot-30.31.0.tar.gz", hash = "sha256:448404736cb0ed1335774e34399a3a99d28274778fb718877556fb7d475d8808", size = 6198638, upload-time = "2026-11-10T18:02:51.359Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/68/e351109f7732f193133c67fbf104178f79b534a925db8f69c074fd190c2c/sqlglot-30.31.0-py3-none-any.whl", hash = "sha256:51a876a43edecf8ee6fd4c872cf6713d899c4234256bba0be96a8c7c8d8781e8", size = 811981, upload-time = "2026-11-10T18:02:49.108Z" },
+]
+
+[[package]]
 name = "starlette"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -678,6 +702,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ee/9f/c5201d42a484c061e528825fc8e2d565f5abd50a4ced6fb7d29c4ec99b2b/truststore-0.10.5.tar.gz", hash = "sha256:30d36967ccaded5cbb38d602c433f53600036c79d502f4533a49b60a03bbefcd", size = 28091, upload-time = "2026-10-12T22:27:31.808Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/e9/3a7820be2bb0fe53b6bc9c3be26d3d1158004e4c3ab953aa6840b955b1e9/truststore-0.10.5-py3-none-any.whl", hash = "sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c", size = 19017, upload-time = "2026-10-12T22:27:30.377Z" },
+]
+
+[[package]]
+name = "types-pytz"
+version = "2026.6.0.20261031"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/67/41/d48d94925fa2e76b744628a9ac8c06002271b03181ee8e3f97bf804323f7/types_pytz-2026.6.0.20261031.tar.gz", hash = "sha256:8b559955f0c628f68159865c6f24835f4323c407a4408365b3676a074b524261", size = 11079, upload-time = "2026-10-31T07:39:13.265Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/0b/b28f2d9eb28c36b331f37cfe8c7b118fe26dfc96101b316155d7cf60bd90/types_pytz-2026.6.0.20261031-py3-none-any.whl", hash = "sha256:d0d4fbe482edfb263440421866cba41d25daba37e5584e0cff6712a3b5a9d9e9", size = 10165, upload-time = "2026-10-31T07:39:12.391Z" },
 ]
 
 [[package]]

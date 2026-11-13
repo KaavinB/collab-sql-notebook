@@ -100,6 +100,7 @@ def build_database(
     large queries. A random name also keeps concurrent builds apart.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Keep this pattern in sync with stale_build_files().
     tmp_path = out_path.with_name(f".{out_path.name}.build-{secrets.token_hex(8)}")
     tmp_wal = tmp_path.with_name(tmp_path.name + ".wal")
 
@@ -141,6 +142,16 @@ def build_database(
         dropped_outside_window=raw_rows - trip_rows,
         zone_rows=zone_rows,
     )
+
+
+def stale_build_files(out_path: Path) -> list[Path]:
+    """Temporary build files for `out_path` left behind by a killed build: the
+    build file, its .wal, and DuckDB's spill directory for it (a directory).
+
+    Only safe to delete while holding the ingest lock (see cli.ingest_lock),
+    when no other build can be writing one.
+    """
+    return sorted(out_path.parent.glob(f".{out_path.name}.build-*"))
 
 
 def _scalar(

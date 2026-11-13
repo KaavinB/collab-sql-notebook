@@ -6,6 +6,7 @@ import pytest
 
 from notebook_api.dataset import cli
 from notebook_api.dataset.build import build_database
+from notebook_api.dataset.download import ChecksumMismatchError
 from tests.fixtures import write_trip_parquet
 
 START, END = date(2024, 1, 1), date(2024, 3, 1)
@@ -153,12 +154,59 @@ def test_cli_requires_a_data_dir() -> None:
         cli.main([])
 
 
-def test_cli_refuses_to_run_while_another_ingest_holds_the_lock(tmp_path: Path) -> None:
-    with (
-        cli.ingest_lock(tmp_path),
-        pytest.raises(cli.IngestAlreadyRunningError, match="already running"),
-    ):
+def test_cli_refuses_to_run_while_another_ingest_holds_the_lock(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with cli.ingest_lock(tmp_path), pytest.raises(SystemExit) as exit_info:
         cli.main(["--data-dir", str(tmp_path)])
+    assert exit_info.value.code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: another ingest is already running")
+    assert "Traceback" not in err
+
+
+def test_cli_reports_a_checksum_mismatch_in_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def tampered(file: object, raw_dir: Path) -> Path:
+        raise ChecksumMismatchError("f.parquet: expected sha256 aaa, got bbb")
+
+    monkeypatch.setattr(cli, "ensure_file", tampered)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--data-dir", str(tmp_path)])
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == "error: f.parquet: expected sha256 aaa, got bbb\n"
+
+
+def test_remove_stale_temp_files_only_touches_leftovers(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    leftovers = [
+        tmp_path / ".taxi.duckdb.build-0123456789abcdef",
+        tmp_path / ".taxi.duckdb.build-0123456789abcdef.wal",
+        raw / ".yellow_tripdata_2024-01.parquet.deadbeefcafef00d.part",
+    ]
+    keep = [
+        tmp_path / "taxi.duckdb",
+        tmp_path / ".ingest.lock",
+        raw / "yellow_tripdata_2024-01.parquet",
+        raw / "taxi_zone_lookup.csv",
+    ]
+    for path in leftovers + keep:
+        path.write_bytes(b"x")
+    # A build killed mid-sort leaves DuckDB's spill directory for the build file.
+    build_spill = tmp_path / ".taxi.duckdb.build-0123456789abcdef.tmp"
+    build_spill.mkdir()
+    (build_spill / "duckdb_temp_block.tmp").write_bytes(b"x")
+    (tmp_path / "taxi.duckdb.tmp").mkdir()  # the API's spill dir: not ours
+
+    removed = cli.remove_stale_temp_files(tmp_path)
+
+    assert sorted(removed) == sorted([*leftovers, build_spill])
+    assert not build_spill.exists()
+    assert all(not p.exists() for p in leftovers)
+    assert all(p.exists() for p in keep)
+    assert (tmp_path / "taxi.duckdb.tmp").is_dir()
 
 
 def test_ingest_lock_is_released_afterwards(tmp_path: Path) -> None:
