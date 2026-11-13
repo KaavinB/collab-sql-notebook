@@ -223,3 +223,73 @@ class NotebookUpdateLogEntry(Base):
     notebook_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("notebooks.id", ondelete="CASCADE"))
     update: Mapped[bytes] = mapped_column(LargeBinary)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class AiRequest(Base):
+    """One request to the AI assistant, and everything it did: the log of every AI query.
+
+    Kept whatever the outcome, so the assistant's behavior can be audited and
+    measured: the prompt, the model, each attempt's SQL, validation error and
+    token counts (in `attempts`), the latency and how it ended.
+    """
+
+    __tablename__ = "ai_requests"
+    __table_args__ = (
+        Index("ix_ai_requests_notebook_cell_created", "notebook_id", "cell_id", "created_at"),
+        CheckConstraint("kind IN ('generate', 'fix', 'explain')", name="ck_ai_requests_kind"),
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed')", name="ck_ai_requests_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    notebook_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("notebooks.id", ondelete="CASCADE"))
+    cell_id: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    kind: Mapped[str] = mapped_column(String(16))
+    # The person's question (generate) or the SQL and error sent (fix/explain).
+    prompt: Mapped[dict[str, Any]] = mapped_column(JSON)
+    model: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(16))
+    # One entry per model call: {"sql", "error", "input_tokens", "output_tokens"}.
+    attempts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    input_tokens: Mapped[int] = mapped_column(default=0)
+    output_tokens: Mapped[int] = mapped_column(default=0)
+    latency_ms: Mapped[int | None]
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    finished_at: Mapped[datetime | None]
+
+
+class AiSuggestion(Base):
+    """A suggestion the AI made for a cell, waiting for a person to accept or reject it.
+
+    The AI never edits a cell itself: an accepted suggestion is applied by the
+    person who accepted it, as their own edit.
+    """
+
+    __tablename__ = "ai_suggestions"
+    __table_args__ = (
+        Index("ix_ai_suggestions_notebook_cell", "notebook_id", "cell_id"),
+        CheckConstraint("kind IN ('generate', 'fix', 'explain')", name="ck_ai_suggestions_kind"),
+        CheckConstraint(
+            "status IN ('pending', 'accepted', 'rejected')", name="ck_ai_suggestions_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    notebook_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("notebooks.id", ondelete="CASCADE"))
+    cell_id: Mapped[str] = mapped_column(String(64))
+    request_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ai_requests.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+    sql: Mapped[str | None] = mapped_column(Text)  # null for explain
+    explanation: Mapped[str] = mapped_column(Text)
+    # The cell's SQL the request was about (fix/explain); null for generate.
+    base_sql: Mapped[str | None] = mapped_column(Text)
+    valid: Mapped[bool]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    decided_at: Mapped[datetime | None]
