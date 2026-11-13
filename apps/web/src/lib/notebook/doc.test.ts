@@ -308,6 +308,7 @@ describe("running state", () => {
     ["an array", []],
     ["missing who", { ...valid, by: undefined }],
     ["a huge name", { ...valid, by: "x".repeat(201) }],
+    ["a huge name in emoji", { ...valid, by: "😀".repeat(201) }],
   ])("ignores a malformed entry (%s)", (_label, value) => {
     expect(readRunning(value)).toBeNull();
   });
@@ -318,6 +319,10 @@ describe("running state", () => {
     expect(isRunActive(running, Date.parse("2026-11-13T10:00:27Z"))).toBe(false);
     expect(isRunActive(readRunning({ ...valid, expiresAt: undefined }), Date.now())).toBe(true);
     expect(isRunActive(null, Date.now())).toBe(false);
+  });
+
+  it("accepts the longest name the API allows, counted in characters", () => {
+    expect(readRunning({ ...valid, by: "😀".repeat(200) })?.by).toHaveLength(400);
   });
 
   it("only sql cells carry it", () => {

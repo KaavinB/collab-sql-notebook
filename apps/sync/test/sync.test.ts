@@ -112,6 +112,27 @@ describe("sync", () => {
     expect(text(a)).toBe(text(b));
   });
 
+  it("has a client's offline edits even if it closes the moment it's synced", async () => {
+    // Browsers keep a page's connection open after the page is gone only
+    // until it's synced, then close it. That's safe only because the server
+    // asks for the client's edits (step 1) before sending its own state
+    // (step 2, which the client takes as "synced"): the edits are already
+    // on their way when it closes.
+    const s = await server();
+    const nb = await createNotebook(pool);
+    const bob = await member(pool, nb, "editor");
+    const offline = new Y.Doc();
+    offline.getText("t").insert(0, "typed offline");
+    const b = client(s, nb, ticketFor(bob, nb), offline);
+    b.provider.on("sync", (isSynced: boolean) => {
+      if (isSynced) b.provider.destroy();
+    });
+    await waitFor(
+      () => s.sync.manager.rooms.get(nb)?.doc.getText("t").toString() === "typed offline",
+      "the offline edit on the server",
+    );
+  });
+
   it("restores the document after a restart", async () => {
     // A long flush interval: the edit is only saved by the shutdown flush.
     const first = await server({ timings: { flushIntervalMs: 60_000 } });

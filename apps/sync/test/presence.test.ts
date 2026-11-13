@@ -80,12 +80,12 @@ describe("presence", () => {
 
     a.provider.awareness.setLocalState({
       user: { id: bob.userId, name: "Bob", color: "#000000" },
-      cursor: { anchor: 1, head: 2 },
+      marker: { anchor: 1, head: 2 },
     });
-    await waitFor(() => stateOf(b, a)?.cursor !== undefined, "Bob to see Alice's state");
+    await waitFor(() => stateOf(b, a)?.marker !== undefined, "Bob to see Alice's state");
     expect(stateOf(b, a)).toEqual({
       user: { id: alice.userId, name: "Alice", color: colorFor(alice.userId) },
-      cursor: { anchor: 1, head: 2 },
+      marker: { anchor: 1, head: 2 },
     });
   });
 
@@ -96,8 +96,8 @@ describe("presence", () => {
     const e = client(nb, ticketFor(editor, nb));
     const v = client(nb, ticketFor(viewer, nb));
     await Promise.all([synced(e), synced(v)]);
-    v.provider.awareness.setLocalStateField("cursor", { anchor: 3 });
-    await waitFor(() => stateOf(e, v)?.cursor !== undefined, "viewer presence");
+    v.provider.awareness.setLocalStateField("marker", { anchor: 3 });
+    await waitFor(() => stateOf(e, v)?.marker !== undefined, "viewer presence");
     expect((stateOf(e, v)!.user as { name: string }).name).toBe("Vera");
   });
 
@@ -109,19 +109,19 @@ describe("presence", () => {
     const a = client(nb, ticketFor(alice, nb));
     const b = client(nb, ticketFor(bob, nb));
     await Promise.all([synced(a), synced(b)]);
-    a.provider.awareness.setLocalStateField("cursor", "alice's");
-    await waitFor(() => stateOf(b, a)?.cursor === "alice's", "Alice's state");
+    a.provider.awareness.setLocalStateField("marker", "alice's");
+    await waitFor(() => stateOf(b, a)?.marker === "alice's", "Alice's state");
 
     // Mallory announces Alice's clientID with a far-future clock, then her own.
     const malloryId = 123456;
     const socket = rawSocket(`${s.url}/notebooks/${nb}?ticket=${ticketFor(mallory, nb)}`, {
       onOpen: (ws) => {
-        ws.send(awarenessFrame(a.doc.clientID, 1_000_000, { cursor: "hijacked" }));
-        ws.send(awarenessFrame(malloryId, 1, { cursor: "mallory's" }));
+        ws.send(awarenessFrame(a.doc.clientID, 1_000_000, { marker: "hijacked" }));
+        ws.send(awarenessFrame(malloryId, 1, { marker: "mallory's" }));
       },
     });
     await waitFor(() => b.provider.awareness.getStates().has(malloryId), "Mallory's own state");
-    expect(stateOf(b, a)?.cursor).toBe("alice's");
+    expect(stateOf(b, a)?.marker).toBe("alice's");
     expect((b.provider.awareness.getStates().get(malloryId)!.user as { name: string }).name).toBe(
       "Mallory",
     );
@@ -141,17 +141,17 @@ describe("presence", () => {
       await synced(b);
       const tabId = 4242;
       const target = `${s.url}/notebooks/${nb}?ticket=`;
-      const cursorOf = () => b.provider.awareness.getStates().get(tabId)?.cursor;
+      const markerOf = () => b.provider.awareness.getStates().get(tabId)?.marker;
       const old = rawSocket(target + ticketFor(alice, nb), {
-        onOpen: (ws) => ws.send(awarenessFrame(tabId, 3, { cursor: "old" })),
+        onOpen: (ws) => ws.send(awarenessFrame(tabId, 3, { marker: "old" })),
       });
-      await waitFor(() => cursorOf() === "old", "old socket's presence");
+      await waitFor(() => markerOf() === "old", "old socket's presence");
 
       // The network dropped; the server hasn't noticed the old socket is dead.
       // Clocks the new socket receives for its own clientID. Anything but its
       // own clock (3) would overwrite the tab's local state with a stale copy.
       const ownClocks: number[] = [];
-      const announce = awarenessFrame(tabId, 3, { cursor: "new" });
+      const announce = awarenessFrame(tabId, 3, { marker: "new" });
       let announced = false;
       const fresh = rawSocket(target + ticketFor(alice, nb), {
         onOpen: (ws) => {
@@ -177,7 +177,7 @@ describe("presence", () => {
           }
         },
       });
-      await waitFor(() => cursorOf() === "new", "new socket's presence");
+      await waitFor(() => markerOf() === "new", "new socket's presence");
       await waitFor(() => ownClocks.length > 0, "the echo of its own state");
       expect(new Set(ownClocks)).toEqual(new Set([3]));
 
@@ -185,10 +185,10 @@ describe("presence", () => {
       old.ws.close();
       await old;
       await sleep(50);
-      expect(cursorOf()).toBe("new");
+      expect(markerOf()).toBe("new");
       fresh.ws.close();
       await fresh;
-      await waitFor(() => cursorOf() === undefined, "removal with the new socket");
+      await waitFor(() => markerOf() === undefined, "removal with the new socket");
     },
   );
 
@@ -199,7 +199,7 @@ describe("presence", () => {
     const a = client(nb, ticketFor(alice, nb));
     const b = client(nb, ticketFor(bob, nb));
     await Promise.all([synced(a), synced(b)]);
-    a.provider.awareness.setLocalStateField("cursor", 1);
+    a.provider.awareness.setLocalStateField("marker", 1);
     await waitFor(() => stateOf(b, a) !== undefined, "presence");
 
     a.provider.disconnect();
@@ -219,8 +219,8 @@ describe("presence", () => {
     const a = client(nb, ticketFor(alice, nb));
     const b = client(nb, ticketFor(bob, nb));
     await Promise.all([synced(a), synced(b)]);
-    b.provider.awareness.setLocalStateField("cursor", "bob's");
-    await waitFor(() => stateOf(a, b)?.cursor === "bob's", "Bob's presence");
+    b.provider.awareness.setLocalStateField("marker", "bob's");
+    await waitFor(() => stateOf(a, b)?.marker === "bob's", "Bob's presence");
 
     // Alice drops Bob's state on disconnect but keeps his clock; Bob stays
     // idle, so only the server's presence list can bring him back.
@@ -228,7 +228,7 @@ describe("presence", () => {
     await waitFor(() => stateOf(a, b) === undefined, "Bob gone on Alice's side");
     a.provider.connect();
     await synced(a);
-    await waitFor(() => stateOf(a, b)?.cursor === "bob's", "Bob back for Alice", 1000);
+    await waitFor(() => stateOf(a, b)?.marker === "bob's", "Bob back for Alice", 1000);
   });
 
   it("gives a joining client everyone's presence", async () => {
@@ -237,10 +237,10 @@ describe("presence", () => {
     const bob = await member(pool, nb, "editor");
     const a = client(nb, ticketFor(alice, nb));
     await synced(a);
-    a.provider.awareness.setLocalStateField("cursor", 7);
+    a.provider.awareness.setLocalStateField("marker", 7);
     await sleep(50);
     const b = client(nb, ticketFor(bob, nb));
     await synced(b);
-    await waitFor(() => stateOf(b, a)?.cursor === 7, "existing presence");
+    await waitFor(() => stateOf(b, a)?.marker === 7, "existing presence");
   });
 });

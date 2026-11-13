@@ -5,7 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 
 import { SignIn } from "@/components/auth/SignIn";
 import { ApiError, createApiClient, type ApiClient, type User } from "@/lib/api";
-import { hasUnsyncedEdits } from "@/lib/notebook/connections";
+import { discardAllConnections, hasUnsyncedEdits } from "@/lib/notebook/connections";
 
 type SessionState =
   | { status: "loading" }
@@ -84,6 +84,8 @@ export function SessionGate({
       setConfirmingSignOut(false);
       try {
         await api.logout();
+        // Nothing of this session may keep talking to the sync server.
+        discardAllConnections();
         setSignOutError(null);
         setState({ status: "signed-out" });
       } catch (error) {

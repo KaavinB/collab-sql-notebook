@@ -148,7 +148,50 @@ function parseState(bytes: Uint8Array): State | null {
   if (typeof value !== "object" || Array.isArray(value)) {
     throw new MalformedMessage("awareness state is not an object");
   }
-  return value as State;
+  const state = value as State;
+  // Editors decode every peer's cursor with Yjs, which throws on a malformed
+  // position; CodeMirror then switches off cursor drawing for that editor.
+  // So one member (a viewer too) could hide everyone's cursors. A cursor
+  // that isn't well-formed is dropped; the rest of the state still goes.
+  if ("cursor" in state && !isCursor(state.cursor)) delete state.cursor;
+  return state;
+}
+
+const isId = (value: unknown): boolean =>
+  typeof value === "object" &&
+  value !== null &&
+  Number.isSafeInteger((value as { client?: unknown }).client) &&
+  (value as { client: number }).client >= 0 &&
+  Number.isSafeInteger((value as { clock?: unknown }).clock) &&
+  (value as { clock: number }).clock >= 0;
+
+/**
+ * A Yjs relative position as y-codemirror sends it: JSON.stringify of a
+ * RelativePosition object into text nested in the document (not
+ * `Y.relativePositionToJSON`, which leaves out null keys). All four keys present, `type` and `item` each
+ * null or an ID with at least one of them set, `tname` null (it names a
+ * top-level type; cell texts are nested in the cells map, so their cursors
+ * never use it, and accepting one would make every peer create that type),
+ * and an integer `assoc`. Yjs throws on anything looser (a missing key reads
+ * `undefined.client`; all of item, type and tname null is "Unexpected case").
+ */
+function isRelativePosition(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value).sort().join(",");
+  if (keys !== "assoc,item,tname,type") return false;
+  const { type, tname, item, assoc } = value as Record<string, unknown>;
+  if (type !== null && !isId(type)) return false;
+  if (item !== null && !isId(item)) return false;
+  if (type === null && item === null) return false;
+  return tname === null && Number.isSafeInteger(assoc);
+}
+
+/** null (no cursor), or {anchor, head} relative positions, as y-codemirror writes. */
+export function isCursor(value: unknown): boolean {
+  if (value === null) return true;
+  if (typeof value !== "object" || Array.isArray(value)) return false;
+  const { anchor, head, ...rest } = value as Record<string, unknown>;
+  return Object.keys(rest).length === 0 && isRelativePosition(anchor) && isRelativePosition(head);
 }
 
 export class RoomAwareness<O> {

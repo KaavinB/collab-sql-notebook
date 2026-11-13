@@ -189,6 +189,10 @@ export class Room {
     // changed offline. Viewers' edits would be dropped anyway, so they're
     // not asked.
     if (conn.canWrite) conn.send(syncMessage(SYNC_STEP1, Y.encodeStateVector(this.doc)));
+    // This goes out before the client can receive our step 2 (which it
+    // treats as "synced"). Browsers rely on that order: a tab kept open only
+    // to deliver offline edits closes once synced, so it must have been
+    // asked for those edits first.
     // Queued messages first: if one claims a clientID (a tab reconnecting
     // while its old socket lingers), the presence list below then treats that
     // entry as the connection's own, instead of sending the tab a stale copy

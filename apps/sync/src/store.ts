@@ -142,9 +142,12 @@ export class Store {
 
   /**
    * Merges the log into the snapshot, in one transaction:
-   *   1. lock the notebook row (FOR UPDATE), the same order DELETE /notebooks
-   *      uses (the notebook row, then its rows by cascade), so the two can't
-   *      deadlock;
+   *   1. lock the notebook row (FOR NO KEY UPDATE), the same order DELETE
+   *      /notebooks uses (the notebook row, then its rows by cascade), so the
+   *      two can't deadlock. NO KEY UPDATE still waits for (and blocks) a
+   *      DELETE, but unlike FOR UPDATE it doesn't block the key-share locks
+   *      that appends' foreign-key checks and the API's run claims take, so
+   *      those carry on while a compaction runs;
    *   2. read the snapshot and the log rows;
    *   3. apply them all into a fresh document and upsert it as the snapshot;
    *   4. delete exactly the rows it read.
@@ -159,9 +162,10 @@ export class Store {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const locked = await client.query("SELECT id FROM notebooks WHERE id = $1 FOR UPDATE", [
-        notebookId,
-      ]);
+      const locked = await client.query(
+        "SELECT id FROM notebooks WHERE id = $1 FOR NO KEY UPDATE",
+        [notebookId],
+      );
       if (locked.rowCount === 0) throw new NotebookGoneError();
       const log = await client.query<{ id: string; update: Buffer }>(
         'SELECT id, "update" FROM notebook_updates WHERE notebook_id = $1 ORDER BY id',

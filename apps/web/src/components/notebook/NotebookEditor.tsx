@@ -117,7 +117,9 @@ function SyncedNotebook({
   // Loaded once the first sync completed; afterwards the notebook stays on
   // screen through disconnects (edits continue offline) and stops.
   const [loaded, setLoaded] = useState(false);
-  if (!loaded && state.status === "live") setLoaded(true);
+  // "offline" only happens after a first sync: a connection kept from an
+  // earlier visit (with offline edits) already has the document to show.
+  if (!loaded && (state.status === "live" || state.status === "offline")) setLoaded(true);
 
   if (!loaded) {
     if (state.status === "stopped") {

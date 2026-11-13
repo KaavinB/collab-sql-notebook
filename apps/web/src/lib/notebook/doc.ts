@@ -125,9 +125,11 @@ function readCell(id: string, cell: unknown): CellView | null {
   };
 }
 
+// The API's limit for a user's name (users.name), in characters (code
+// points, not UTF-16 units: one emoji is one character there, two units here).
 const MAX_RUNNING_TEXT = 200;
 const shortString = (value: unknown): value is string =>
-  typeof value === "string" && value.length <= MAX_RUNNING_TEXT;
+  typeof value === "string" && [...value].length <= MAX_RUNNING_TEXT;
 
 /** Reads a cell's `running` entry, or null if it's absent or malformed. */
 export function readRunning(value: unknown): RunningState | null {

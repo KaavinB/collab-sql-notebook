@@ -6,8 +6,10 @@ import { appendCell, orderedCells } from "@/lib/notebook/doc";
 import { connectNotebook, type NotebookSync } from "@/lib/notebook/sync";
 import { fakeApi, NOTEBOOK } from "@/test/fakeApi";
 import { fakeProviders } from "@/test/fakeSync";
+import { ticketFor } from "@/test/tickets";
 
-const ticket = (role: "owner" | "editor" | "viewer" = "editor", value = "t1") => ({
+const token = (user: string, nonce = "t1") => ticketFor(user, nonce);
+const ticket = (role: "owner" | "editor" | "viewer" = "editor", value = token("user-a")) => ({
   ticket: value,
   url: "ws://sync.test",
   role,
@@ -43,7 +45,7 @@ describe("connectNotebook", () => {
     const provider = providers.latest();
     expect(provider.serverUrl).toBe("ws://sync.test/notebooks");
     expect(provider.room).toBe(NOTEBOOK.id);
-    expect(provider.params).toEqual({ ticket: "t1" });
+    expect(provider.params).toEqual({ ticket: token("user-a") });
     expect(sync.get()).toEqual({ status: "connecting", role: "editor" });
 
     provider.serve(storedDoc());
@@ -77,8 +79,8 @@ describe("connectNotebook", () => {
     async (code) => {
       const syncTicket = vi
         .fn<ApiClient["syncTicket"]>()
-        .mockResolvedValueOnce(ticket("editor", "t1"))
-        .mockResolvedValueOnce(ticket("viewer", "t2"));
+        .mockResolvedValueOnce(ticket("editor", token("user-a", "t1")))
+        .mockResolvedValueOnce(ticket("viewer", token("user-a", "t2")));
       const { sync, providers } = connect(fakeApi({ syncTicket }));
       await flush();
       const provider = providers.latest();
@@ -86,7 +88,7 @@ describe("connectNotebook", () => {
       provider.close(code);
       await flush();
       expect(syncTicket).toHaveBeenCalledTimes(2);
-      expect(provider.params).toEqual({ ticket: "t2" });
+      expect(provider.params).toEqual({ ticket: token("user-a", "t2") });
       expect(provider.connects).toBe(1);
       expect(sync.get()).toEqual({ status: "offline", role: "viewer" });
       provider.serve();
@@ -172,6 +174,36 @@ describe("connectNotebook", () => {
     provider.close(4401);
     await vi.advanceTimersByTimeAsync(0);
     expect(provider.connects).toBe(3);
+  });
+
+  it("stops rather than continue as someone else who signed in meanwhile", async () => {
+    const syncTicket = vi
+      .fn<ApiClient["syncTicket"]>()
+      .mockResolvedValueOnce(ticket("editor", token("user-a")))
+      .mockResolvedValueOnce(ticket("editor", token("user-b")));
+    const { sync, providers } = connect(fakeApi({ syncTicket }));
+    await flush();
+    const provider = providers.latest();
+    provider.serve();
+    provider.close(4401);
+    await flush();
+    expect(sync.get()).toMatchObject({ status: "stopped", reason: "signed-out" });
+    expect(provider.connects).toBe(0);
+    expect(provider.params).toEqual({ ticket: token("user-a") });
+  });
+
+  it("fails closed when its first ticket can't be read", async () => {
+    // Without a readable owner, no later ticket can be shown to be ours.
+    const syncTicket = vi
+      .fn<ApiClient["syncTicket"]>()
+      .mockResolvedValueOnce(ticket("editor", "unreadable"))
+      .mockResolvedValueOnce(ticket("editor", token("user-a")));
+    const { sync, providers } = connect(fakeApi({ syncTicket }));
+    await flush();
+    providers.latest().serve();
+    providers.latest().close(4401);
+    await flush();
+    expect(sync.get()).toMatchObject({ status: "stopped", reason: "signed-out" });
   });
 
   it("destroys the provider and stops notifying when destroyed", async () => {

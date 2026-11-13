@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   closeConnection,
+  discardAllConnections,
   hasUnsyncedEdits,
   openConnection,
   resetConnections,
@@ -76,5 +77,18 @@ describe("notebook connections", () => {
     const calm = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(calm);
     expect(calm.defaultPrevented).toBe(false);
+  });
+
+  it("discarding (sign-out) leaves nothing behind, even for a page that unmounts afterwards", async () => {
+    const { sync, providers } = await offlineWithAnEdit();
+    discardAllConnections(); // signing out
+    closeConnection(NOTEBOOK.id, sync); // then the page unmounts
+    expect(providers.latest().destroyed).toBe(true);
+    expect(hasUnsyncedEdits()).toBe(false);
+    // Reopening starts a fresh connection, not the discarded one.
+    const reopened = openConnection(fakeApi(), NOTEBOOK.id, providers.factory);
+    expect(reopened).not.toBe(sync);
+    await flush(); // the provider is created once the ticket arrives
+    expect(providers.created).toHaveLength(2);
   });
 });

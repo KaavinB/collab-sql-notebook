@@ -2,9 +2,11 @@
 import * as decoding from "lib0/decoding";
 import * as encoding from "lib0/encoding";
 import { describe, expect, it } from "vitest";
+import * as Y from "yjs";
 
 import {
   colorFor,
+  isCursor,
   MAX_STATE_BYTES,
   OUTDATED_TIMEOUT_MS,
   PALETTE,
@@ -163,6 +165,55 @@ describe("RoomAwareness", () => {
     // Its next renewal brings it back.
     expect(awareness.apply("c", ALICE, update([[1, 1, { x: 1 }]])).forPeers).not.toBeNull();
     expect(awareness.size).toBe(1);
+  });
+
+  it("keeps a real cursor and drops a malformed one that would break peers' editors", () => {
+    // Exactly what a cell editor sends: y-codemirror puts Yjs relative
+    // positions of the cell's text (nested in the cells map) in awareness,
+    // which serializes them with JSON.stringify.
+    const doc = new Y.Doc();
+    const cell = new Y.Map<unknown>();
+    doc.getMap("cells").set("c1", cell);
+    const text = new Y.Text();
+    cell.set("source", text);
+    text.insert(0, "select 1");
+    const wire = (index: number) =>
+      JSON.parse(JSON.stringify(Y.createRelativePositionFromTypeIndex(text, index))) as unknown;
+    const position = wire(3);
+    expect(isCursor({ anchor: wire(0), head: wire(8) })).toBe(true); // end of text: item null
+    const cursor = { anchor: position, head: position };
+    expect(isCursor(cursor)).toBe(true);
+    expect(isCursor(null)).toBe(true);
+    // Each of these makes Y.createAbsolutePositionFromRelativePosition throw.
+    for (const bad of [
+      5,
+      { type: { client: 1 } },
+      { item: { client: 999, clock: "a" } },
+      // Shapes a looser check accepted; each makes Yjs throw too.
+      {},
+      { assoc: 0 },
+      { item: null, type: null, tname: null, assoc: 0 },
+      { type: { client: 1, clock: 0 } },
+      { tname: null, item: null, assoc: 0 },
+      // A top-level type name: never used by cell cursors.
+      { item: null, type: null, tname: "anything", assoc: 0 },
+    ]) {
+      expect(isCursor({ anchor: bad, head: position })).toBe(false);
+    }
+    expect(isCursor({ anchor: position, head: position, extra: 1 })).toBe(false);
+    expect(isCursor("anywhere")).toBe(false);
+
+    const { awareness } = setup();
+    const result = awareness.apply(
+      "connA",
+      ALICE,
+      update([[1, 0, { cursor: { anchor: 5, head: 5 }, x: 1 }]]),
+    );
+    const [[, , state]] = decode(result.forPeers) as [[number, number, unknown]];
+    expect(state).toEqual({ user: ALICE, x: 1 }); // the rest of the state still goes
+    const good = awareness.apply("connA", ALICE, update([[1, 1, { cursor }]]));
+    const [[, , kept]] = decode(good.forPeers) as [[number, number, unknown]];
+    expect(kept).toEqual({ user: ALICE, cursor });
   });
 
   it("picks a stable palette color per user", () => {

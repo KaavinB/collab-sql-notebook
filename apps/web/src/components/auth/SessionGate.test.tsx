@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SessionGate, useSession } from "@/components/auth/SessionGate";
 import { appendCell } from "@/lib/notebook/doc";
-import { openConnection, resetConnections } from "@/lib/notebook/connections";
+import { closeConnection, openConnection, resetConnections } from "@/lib/notebook/connections";
 import { fakeProviders } from "@/test/fakeSync";
 import { ApiError, type ApiClient } from "@/lib/api";
 import { deferred, fakeApi, NOTEBOOK, USER } from "@/test/fakeApi";
@@ -148,6 +148,7 @@ describe("SessionGate", () => {
     providers.latest().serve();
     providers.latest().drop();
     appendCell(sync.doc, "sql");
+    closeConnection(NOTEBOOK.id, sync); // its page is gone; it's kept for the edits
     const api = fakeApi();
     render(
       <SessionGate api={api}>
@@ -162,6 +163,8 @@ describe("SessionGate", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
     fireEvent.click(await screen.findByRole("button", { name: "Sign out anyway" }));
     await waitFor(() => expect(api.logout).toHaveBeenCalledTimes(1));
+    // The kept connection is closed too: it can't send edits after sign-out.
+    await waitFor(() => expect(providers.latest().destroyed).toBe(true));
   });
 
   it("shows a non-auth failure as an error, not as signed out", async () => {

@@ -60,7 +60,10 @@ export function openConnection(
 }
 
 export function closeConnection(notebookId: string, sync: NotebookSync): void {
-  open.delete(sync);
+  // Not open anymore: it was already discarded (signing out closes every
+  // connection before the pages unmount). It's destroyed; keeping it would
+  // leave a dead connection that looks unsynced forever.
+  if (!open.delete(sync)) return;
   const done = () => !sync.hasUnsyncedEdits() || sync.get().status === "stopped";
   if (done()) {
     sync.destroy();
@@ -68,7 +71,10 @@ export function closeConnection(notebookId: string, sync: NotebookSync): void {
   }
   lingering.set(sync, notebookId);
   const unsubscribe = sync.subscribe(() => {
-    // Synced: the server has everything. Stopped: it never will (no access,
+    // Synced: the server has everything. This relies on the sync server
+    // asking for our missing edits (sync step 1) before it sends its own
+    // state (step 2, which marks us synced): our edits then leave before
+    // destroy() closes the socket. See Room.open in apps/sync. Stopped: it never will (no access,
     // deleted, signed out), and keeping it wouldn't help.
     if (sync.get().status === "live" ? !sync.hasUnsyncedEdits() : done()) {
       lingering.delete(sync);
@@ -80,10 +86,19 @@ export function closeConnection(notebookId: string, sync: NotebookSync): void {
   stopWatching.set(sync, unsubscribe);
 }
 
-/** For tests: forget every connection. */
-export function resetConnections(): void {
+/**
+ * Closes every connection, kept ones included, dropping unsynced edits.
+ * Used when signing out: a kept connection's ticket stays valid for up to a
+ * minute, so it could otherwise still send edits after the session ended,
+ * or, in the same tab, alongside the next person who signs in. Tests use it
+ * to start clean.
+ */
+export function discardAllConnections(): void {
   for (const sync of [...open, ...lingering.keys()]) sync.destroy();
   open.clear();
   lingering.clear();
   stopWatching.clear();
 }
+
+/** Alias of discardAllConnections, for test setup. */
+export const resetConnections = discardAllConnections;

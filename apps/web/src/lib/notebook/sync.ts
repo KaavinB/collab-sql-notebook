@@ -159,6 +159,20 @@ export function connectNotebook(
     return null;
   };
 
+  // The user this connection belongs to, from its first ticket. Tickets are
+  // fetched with whatever session cookie the browser holds now: if someone
+  // else signed in in another tab, a later ticket names them, and this tab's
+  // edits must not reach the server as theirs.
+  // Fails closed: if the first ticket can't be read, no later ticket can be
+  // shown to be ours, so a reconnect stops instead. (The API's tickets are
+  // always readable; this only guards against something unexpected.)
+  let owner: string | null | undefined; // undefined until the first ticket
+  const sameOwner = (token: string): boolean => {
+    const user = ticketUser(token);
+    if (owner === undefined) owner = user;
+    return user !== null && user === owner;
+  };
+
   const reconnectWithNewTicket = async () => {
     refusals++;
     if (refusals > 1) {
@@ -170,6 +184,10 @@ export function connectNotebook(
     }
     const ticket = await fetchTicket();
     if (!ticket || destroyed || !provider) return;
+    if (!sameOwner(ticket.ticket)) {
+      stop("signed-out", "You're signed in as someone else now. Reload the page to continue.");
+      return;
+    }
     provider.params = { ticket: ticket.ticket };
     set(
       loaded
@@ -189,6 +207,7 @@ export function connectNotebook(
   (async () => {
     const ticket = await fetchTicket();
     if (!ticket || destroyed) return;
+    sameOwner(ticket.ticket);
     set({ status: "connecting", role: ticket.role });
     const created = createProvider(`${ticket.url}/notebooks`, notebookId, doc, ticket.ticket);
     provider = created;
@@ -225,4 +244,20 @@ export function connectNotebook(
       doc.destroy();
     },
   };
+}
+
+/**
+ * The user ID a ticket names (its `u` claim), or null if it can't be read.
+ * Only read, never trusted: the sync server verifies the signature. This
+ * just notices a ticket issued to someone else.
+ */
+export function ticketUser(ticket: string): string | null {
+  try {
+    const encoded = ticket.split(".")[0].replace(/-/g, "+").replace(/_/g, "/");
+    const payload: unknown = JSON.parse(atob(encoded));
+    const user = (payload as { u?: unknown } | null)?.u;
+    return typeof user === "string" ? user : null;
+  } catch {
+    return null;
+  }
 }

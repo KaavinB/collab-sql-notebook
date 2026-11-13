@@ -14,7 +14,8 @@ import * as Y from "yjs";
 import { NotebookEditor } from "@/components/notebook/NotebookEditor";
 import { ApiError, type ApiClient, type Notebook } from "@/lib/api";
 import { appendCell, cellsMap, orderedCells, setLastRun } from "@/lib/notebook/doc";
-import { fakeApi, NOTEBOOK } from "@/test/fakeApi";
+import { fakeApi, NOTEBOOK, USER } from "@/test/fakeApi";
+import { ticketFor } from "@/test/tickets";
 import { fakeProviders } from "@/test/fakeSync";
 import { resetConnections } from "@/lib/notebook/connections";
 
@@ -104,13 +105,25 @@ describe("NotebookEditor", () => {
   it("follows a role change pushed by the server", async () => {
     const syncTicket = vi
       .fn<ApiClient["syncTicket"]>()
-      .mockResolvedValueOnce({ ticket: "t1", url: "ws://sync.test", role: "editor" })
-      .mockResolvedValueOnce({ ticket: "t2", url: "ws://sync.test", role: "viewer" });
+      .mockResolvedValueOnce({
+        ticket: ticketFor(USER.id, "1"),
+        url: "ws://sync.test",
+        role: "editor",
+      })
+      .mockResolvedValueOnce({
+        ticket: ticketFor(USER.id, "2"),
+        url: "ws://sync.test",
+        role: "viewer",
+      });
     const { providers, serve } = renderEditor({ syncTicket });
     await serve();
     expect(await screen.findByRole("button", { name: "+ SQL" })).toBeTruthy();
     act(() => providers.latest().close(4403));
+    // Reconnects with the new ticket, now as a viewer: still live, view-only.
+    await waitFor(() => expect(providers.latest().connects).toBe(1));
+    act(() => providers.latest().serve());
     await waitFor(() => expect(screen.getByTestId("view-only")).toBeTruthy());
+    expect(screen.getByTestId("sync-status").textContent).toBe("Live");
     expect(screen.queryByRole("button", { name: "+ SQL" })).toBeNull();
   });
 
@@ -173,8 +186,10 @@ describe("NotebookEditor", () => {
       />,
     );
     expect(providers.created).toHaveLength(1); // the same connection, not a new one
-    act(() => providers.latest().serve());
+    // Still offline: the kept document shows at once, and can still be edited.
     expect(await screen.findByTestId("editor")).toBeTruthy(); // the offline cell is still there
+    expect(screen.getByTestId("sync-status").textContent).toMatch(/^Offline/);
+    expect(screen.getByRole("button", { name: "+ SQL" })).toBeTruthy();
   });
 
   it("shows who is here", async () => {
@@ -222,7 +237,7 @@ describe("NotebookEditor", () => {
     async function renderAs(role: Notebook["role"]) {
       const { api, serve } = renderEditor({
         getNotebook: async () => ({ ...NOTEBOOK, role }),
-        syncTicket: async () => ({ ticket: "t", url: "ws://sync.test", role }),
+        syncTicket: async () => ({ ticket: ticketFor(USER.id), url: "ws://sync.test", role }),
       });
       await serve(storedDocWithEveryCellType());
       return api;

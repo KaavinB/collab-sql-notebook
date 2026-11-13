@@ -1,6 +1,7 @@
 import { vi } from "vitest";
 
 import type { ApiClient, Notebook, Run, User } from "@/lib/api";
+import { ticketFor } from "@/test/tickets";
 
 export const NOTEBOOK: Notebook = {
   id: "4e7cec47-ee07-48e8-b7cd-3b878e00aa86",
@@ -75,7 +76,7 @@ export function fakeApi(overrides: Partial<ApiClient> = {}) {
     })),
     removeMember: vi.fn<ApiClient["removeMember"]>(async () => {}),
     syncTicket: vi.fn<ApiClient["syncTicket"]>(async () => ({
-      ticket: "ticket",
+      ticket: ticketFor(USER.id),
       url: "ws://localhost:8020",
       role: "owner",
     })),
