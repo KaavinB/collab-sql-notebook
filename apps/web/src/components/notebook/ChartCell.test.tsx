@@ -156,6 +156,38 @@ describe("chart identity", () => {
 });
 
 describe("Chart (real Vega, SVG renderer)", () => {
+  it("shows image and title columns as text in tooltips", async () => {
+    const url = "https://tracker.example/pixel.png";
+    const hostile: QueryResult = {
+      ...result,
+      columns: [
+        { name: "image", type: "VARCHAR" },
+        { name: "title", type: "BIGINT" },
+      ],
+      rows: [[url, 10]],
+      row_count: 1,
+    };
+    const plan = buildChartSpec(
+      { ...DEFAULT_CHART_CONFIG, source: "sql-1", x: "image", y: "title" },
+      hostile,
+    );
+    if (!plan.ok) throw new Error(plan.reason);
+    render(<Chart spec={plan.spec} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("chart").querySelector(".mark-rect path")).not.toBeNull(),
+    );
+    const bar = screen.getByTestId("chart").querySelector(".mark-rect path")!;
+    fireEvent.pointerMove(bar, { clientX: 10, clientY: 10 });
+    await waitFor(() => {
+      const tooltip = document.getElementById("vg-tooltip-element");
+      expect(tooltip?.textContent).toContain(url);
+      expect(tooltip?.textContent).toContain("image");
+      expect(tooltip?.textContent).toContain("title");
+      expect(tooltip?.querySelector("img")).toBeNull();
+    });
+    document.getElementById("vg-tooltip-element")?.remove();
+  });
+
   it("draws one bar per row", async () => {
     const plan = buildChartSpec(
       { ...DEFAULT_CHART_CONFIG, source: "sql-1", x: "borough", y: "trips" },

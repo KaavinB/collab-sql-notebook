@@ -1,5 +1,5 @@
 /**
- * Chart cells (D9).
+ * Typed chart cells.
  *
  * A chart cell stores a small typed ChartConfig in the shared document: which
  * SQL cell it charts, the mark, and which result columns go on x, y and
@@ -14,7 +14,7 @@
  * has two columns with the same name, the first one is charted.
  *
  * Dates and times: the API sends DuckDB's wall-clock values (its session time
- * zone is UTC, D4) as ISO strings, some without an offset. They're converted
+ * zone is UTC) as ISO strings, some without an offset. They're converted
  * to epoch milliseconds read as UTC, and charted on UTC scales with UTC
  * formatting, so the chart shows exactly the values in the result, whatever
  * the viewer's time zone. (Read as local time, a DATE drew a day early west
@@ -133,7 +133,7 @@ export function utcMillis(value: string): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-/** A result value as a chart value. Big integers and DECIMALs arrive as strings (D15). */
+/** A result value as a chart value. Big integers and DECIMALs arrive as strings to preserve precision. */
 function chartValue(value: unknown, type: FieldType): string | number | null {
   if (value === null || value === undefined) return null;
   if (type === "quantitative") {

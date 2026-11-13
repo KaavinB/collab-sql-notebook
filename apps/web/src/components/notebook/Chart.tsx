@@ -2,12 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { formatChartTooltip } from "@/lib/notebook/chartTooltip";
+
 /**
  * Renders a Vega-Lite spec built by buildChartSpec.
  *
  * - Vega is loaded on demand, so notebooks without charts don't download it.
  * - Expressions are evaluated by vega-interpreter (`ast: true`), never by
- *   eval/new Function, so the page works under a strict Content-Security-Policy.
+ *   eval/new Function. Full-page Content-Security-Policy support has not yet
+ *   been verified.
  * - The loader refuses every network and file load, and every URL Vega would
  *   otherwise sanitize and follow (image marks, links). Specs only carry inline
  *   data anyway; this keeps it that way even if a spec were ever tampered with.
@@ -44,6 +47,9 @@ export function Chart({ spec }: { spec: Record<string, unknown> }) {
           ast: true,
           expr: expressionInterpreter,
           loader,
+          // The default formatter turns a column named "image" into an img
+          // outside Vega's loader. Our formatter treats all values as text.
+          tooltip: { formatTooltip: formatChartTooltip },
         });
         if (cancelled) result.finalize();
         else finalize = () => result.finalize();

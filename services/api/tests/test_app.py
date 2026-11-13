@@ -66,6 +66,7 @@ def test_cors_wildcard_is_rejected(monkeypatch: pytest.MonkeyPatch, value: str) 
 def test_defaults_are_safe_for_production() -> None:
     settings = Settings()
     assert settings.api_host == "127.0.0.1"
+    assert settings.api_port == 8010
     assert settings.api_reload is False
 
 
@@ -111,3 +112,25 @@ def test_tests_refuse_a_database_not_named_test(url: str, allowed: bool) -> None
     else:
         with pytest.raises(ValueError, match="must end in '_test'"):
             require_test_database(url)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/notebooks",
+        "/notebooks/not-a-uuid",
+        "/notebooks/4e7cec47-ee07-48e8-b7cd-3b878e00aa86/cells/c1/runs",
+    ],
+)
+def test_json_bodies_are_capped_before_validation(path: str) -> None:
+    # 413 comes from the middleware, before routing, validation or any
+    # database dependency: this app has no database configured at all.
+    response = _client().request(
+        "PATCH" if path.endswith("not-a-uuid") else "POST",
+        path,
+        content=b'{"ignored":"' + b"x" * 262_144 + b'"}',
+        headers={"Content-Type": "application/json", "Origin": ALLOWED},
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"]["kind"] == "too_large"
+    assert response.headers["access-control-allow-origin"] == ALLOWED

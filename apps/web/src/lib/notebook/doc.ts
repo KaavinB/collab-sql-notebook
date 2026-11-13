@@ -1,5 +1,5 @@
 /**
- * The notebook's shared document (D1, D2).
+ * The notebook's shared Yjs document, ordered with fractional indexes.
  *
  * Everything a user edits lives in one Yjs document (Y.Doc), so Phase 2 can
  * sync it between browsers without changing this model:
@@ -8,9 +8,9 @@
  *     cell.get("type")      "sql" | "markdown" | "chart"
  *     cell.get("order")     fractional index string (sorts the cells)
  *     cell.get("source")    Y.Text, for sql and markdown cells
- *     cell.get("lastRunId") string | null, for sql cells (D6: results live in
+ *     cell.get("lastRunId") string | null, for sql cells (results live in
  *                           Postgres; the document only points at them)
- *     cell.get("chart")     Y.Map, for chart cells: the ChartConfig (D9),
+ *     cell.get("chart")     Y.Map, for chart cells: the ChartConfig,
  *                           one entry per field (see chart.ts)
  *
  * Why a map plus an `order` string, not a Y.Array of cells: Yjs arrays have no
@@ -227,7 +227,7 @@ export function deleteCell(doc: Y.Doc, id: string): void {
   });
 }
 
-/** Points a sql cell at its latest stored run (D6). */
+/** Points a sql cell at its latest stored run in Postgres. */
 export function setLastRun(doc: Y.Doc, id: string, runId: string): void {
   doc.transact(() => {
     const cell = cellsMap(doc).get(id);

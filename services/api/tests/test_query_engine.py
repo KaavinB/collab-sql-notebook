@@ -161,7 +161,7 @@ def test_every_query_cursor_runs_in_utc(con: duckdb.DuckDBPyConnection) -> None:
 @pytest.mark.parametrize(
     ("sql", "expected"),
     [
-        # Known limitations of DuckDB's Python conversion, documented in D15.
+        # Known limitations of DuckDB's Python conversion, pinned here.
         ("SELECT INTERVAL '1 month 3 days'", "33 days, 0:00:00"),
         ("SELECT 'infinity'::TIMESTAMP", "9999-12-31T23:59:59.999999"),
     ],

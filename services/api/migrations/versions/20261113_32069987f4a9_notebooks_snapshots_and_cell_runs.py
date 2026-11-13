@@ -1,4 +1,4 @@
-"""Notebooks, Yjs snapshots and cell runs (D6, D7).
+"""Notebooks, Yjs snapshots and cell runs.
 
 Revision ID: 32069987f4a9
 Revises:

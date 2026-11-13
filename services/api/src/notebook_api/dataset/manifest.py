@@ -1,4 +1,4 @@
-"""The exact dataset files we ingest, pinned by SHA-256 (D8).
+"""The exact dataset files we ingest, pinned by SHA-256.
 
 The checksums were recorded from the files the NYC TLC CDN served on
 2026-11-13. If TLC republishes a file, ingest fails loudly instead of silently

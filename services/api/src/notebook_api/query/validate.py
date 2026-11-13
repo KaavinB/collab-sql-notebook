@@ -1,10 +1,10 @@
-"""Static checks on user SQL before it reaches DuckDB (layer 1 of D4).
+"""Static checks on user SQL before it reaches DuckDB (before engine-level isolation).
 
 The parser is not the security boundary on its own: a SELECT can still call
 DuckDB table functions. The engine lockdown in `engine.py` (read-only file,
 external access off, settings locked) is what makes those calls fail. This
 layer gives clear errors early, rejects anything that isn't a single query,
-and applies the row cap (D5).
+and applies the row cap through the syntax tree.
 
 What runs is the SQL that sqlglot generates from the checked tree, never the
 original text, so the statement that was validated is exactly the one that
@@ -47,6 +47,11 @@ _FORBIDDEN_NODES: tuple[type[exp.Expression], ...] = (
 # always be incomplete. Even if a new SQL-running function slipped through,
 # each query gets a fresh cursor, so it couldn't leave state behind.)
 _FORBIDDEN_FUNCTIONS = frozenset({"query", "query_table", "json_execute_serialized_sql"})
+
+
+# Generous for hand-written or AI-written queries, and keeps parsing cheap:
+# sqlglot is pure Python, so parse time grows with the query's length.
+MAX_SQL_CHARS = 20_000
 
 
 class QueryRejectedError(Exception):
@@ -103,7 +108,7 @@ def prepare_query(sql: str, row_limit: int) -> PreparedQuery:
 
 
 def _cap_rows(tree: exp.Query, fetch_limit: int) -> exp.Query:
-    """Make the query return at most `fetch_limit` rows (D5).
+    """Make the query return at most `fetch_limit` rows through the syntax tree.
 
     Rewriting the query's own LIMIT lets DuckDB stop early and keeps the
     user's ORDER BY and OFFSET as written. A LIMIT that isn't a plain integer

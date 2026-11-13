@@ -33,7 +33,7 @@ class Notebook(Base):
 
 
 class NotebookSnapshot(Base):
-    """The whole Yjs document, as one `Y.encodeStateAsUpdate` blob (D7, provisional).
+    """The whole Yjs document as one provisional, single-writer snapshot blob.
 
     One row per notebook. Phase 2 decides the real snapshot and compaction
     strategy; an update-log table can be added next to this one.
@@ -49,7 +49,7 @@ class NotebookSnapshot(Base):
 
 
 class CellRun(Base):
-    """One execution of a cell's SQL and its outcome, shared by everyone (D6).
+    """One execution of a cell's SQL and its outcome, shared by everyone.
 
     Results live here, not in the Yjs document; the document only stores the
     latest run's ID per cell.

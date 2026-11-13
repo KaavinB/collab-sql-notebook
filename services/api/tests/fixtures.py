@@ -1,8 +1,16 @@
 """Helpers that write tiny raw files shaped exactly like the real TLC downloads."""
 
+import json
+import os
+from multiprocessing.connection import Connection
 from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import duckdb
+
+if TYPE_CHECKING:
+    from notebook_api.query.engine import EngineLimits
 
 # The raw TLC column names and types, as they appear in the 2024 Parquet files.
 RAW_TRIP_SCHEMA = """
@@ -68,3 +76,20 @@ def write_query_test_db(path: Path) -> Path:
 
 def exit_immediately(*_args: object) -> None:
     """A worker target that exits before saying hello (for runner startup tests)."""
+
+
+def report_worker_environment(
+    conn: Connection, db_path: str, spill_dir: str, limits: EngineLimits
+) -> None:
+    """Run the real worker, recording env names when it opens DuckDB."""
+    from notebook_api.query import worker
+    from notebook_api.query.engine import open_connection
+
+    def recording_open(
+        db_path: Path, spill_dir: Path, limits: EngineLimits
+    ) -> duckdb.DuckDBPyConnection:
+        (spill_dir / "environment.json").write_text(json.dumps(sorted(os.environ)))
+        return open_connection(db_path, spill_dir, limits)
+
+    with patch.object(worker, "open_connection", recording_open):
+        worker.worker_main(conn, db_path, spill_dir, limits)

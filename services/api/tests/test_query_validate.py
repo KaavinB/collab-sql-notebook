@@ -100,10 +100,10 @@ def _nested_subqueries(depth: int) -> str:
 
 
 @pytest.mark.parametrize("on_thread", [False, True], ids=["main", "thread"])
-def test_nesting_limits_documented_in_d17(on_thread: bool) -> None:
-    # Pins the limits quoted in DECISIONS.md D17, with a margin, on the main
+def test_nesting_limits_on_main_and_worker_threads(on_thread: bool) -> None:
+    # Pins accepted/rejected nesting bounds, with a margin, on the main
     # thread and on a worker thread (where the API parses). If a sqlglot or
-    # Python upgrade moves them, this fails and D17 needs updating.
+    # Python upgrade moves them, these bounds need reviewing.
     def check() -> None:
         prepare_query(_nested_parens(40), row_limit=100)
         prepare_query(_nested_subqueries(85), row_limit=100)

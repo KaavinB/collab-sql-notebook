@@ -77,6 +77,14 @@ def test_title_is_validated(client: TestClient, title: str) -> None:
     assert client.post("/notebooks", json={"title": title}).status_code == 422
 
 
+def test_title_validation_does_not_echo_private_input(client: TestClient) -> None:
+    response = client.post("/notebooks", json={"title": "private-title-" * 100})
+    assert response.status_code == 422
+    assert response.json()["detail"]["kind"] == "invalid"
+    assert "private-title" not in response.text
+    assert len(response.content) < 1_000
+
+
 def test_unknown_and_malformed_ids(client: TestClient) -> None:
     assert client.get(f"/notebooks/{uuid.uuid4()}").status_code == 404
     assert client.get("/notebooks/not-a-uuid").status_code == 422
@@ -447,3 +455,65 @@ def test_constraint_bugs_in_run_storage_are_not_reported_as_not_found(
     monkeypatch.setattr(CellRun, "__init__", broken_init)
     with pytest.raises(IntegrityError):
         client.post(f"/notebooks/{notebook_id}/cells/c1/runs", json={"sql": "select 1"})
+
+
+# --- request validation ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"sql": "private-sql-" * 2_000}, {"sql": {"secret": "private-value"}}, {}],
+)
+def test_validation_errors_name_the_problem_without_echoing_input(
+    client: TestClient, body: dict[str, object]
+) -> None:
+    notebook_id = _create(client)["id"]
+    response = client.post(f"/notebooks/{notebook_id}/cells/c1/runs", json=body)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "invalid"
+    assert "sql" in detail["message"]
+    assert "private-" not in response.text
+    assert len(response.content) < 1_000
+
+
+def test_a_too_long_query_says_so(client: TestClient) -> None:
+    notebook_id = _create(client)["id"]
+    response = client.post(
+        f"/notebooks/{notebook_id}/cells/c1/runs", json={"sql": "select 1 " * 3_000}
+    )
+    assert response.status_code == 422
+    assert "at most 20000 characters" in response.json()["detail"]["message"]
+
+
+def test_malformed_json_is_reported_without_echoing_the_body(client: TestClient) -> None:
+    notebook_id = _create(client)["id"]
+    response = client.post(
+        f"/notebooks/{notebook_id}/cells/c1/runs",
+        content=b'{"sql":"private-value"',
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["kind"] == "invalid"
+    assert "private-value" not in response.text
+
+
+def test_a_large_result_is_stored_and_returned(client: TestClient) -> None:
+    # Replies larger than a pipe buffer must survive the worker pipe, storage
+    # and the response. (Moved here from the removed POST /query route.)
+    notebook_id = _create(client)["id"]
+    run = _run(client, notebook_id, "select i, repeat('x', 4000) as s from nums order by i")
+    assert run["result"]["row_count"] == 50
+    fetched = client.get(f"/notebooks/{notebook_id}/runs/{run['id']}")
+    assert len(fetched.content) > 200_000
+
+
+def test_running_a_cell_answers_503_without_a_query_engine(clean_db: str) -> None:
+    settings = Settings(database_url=clean_db, duckdb_path=None, api_allowed_hosts=["testserver"])
+    with TestClient(create_app(settings)) as no_engine:
+        notebook_id = _create(no_engine)["id"]
+        response = no_engine.post(
+            f"/notebooks/{notebook_id}/cells/c1/runs", json={"sql": "select 1"}
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"]["kind"] == "unavailable"

@@ -1,5 +1,5 @@
 /**
- * Saves the notebook's Yjs document to the API after edits (D7, provisional).
+ * Saves the notebook's Yjs document to the API after edits (provisional single-writer persistence).
  *
  * Phase 1 has one writer, so it saves the whole document
  * (`Y.encodeStateAsUpdate`) a short while after the last change. Phase 2

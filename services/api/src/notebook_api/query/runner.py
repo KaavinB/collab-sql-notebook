@@ -1,4 +1,4 @@
-"""A pool of query worker processes (D3, D16).
+"""A pool of query worker processes with hard timeout and replacement.
 
 Why processes: a query that ignores DuckDB's interrupt, or blows past the
 memory limit, can be killed outright without touching the API process. A
@@ -146,7 +146,15 @@ class QueryRunner:
         request_id = secrets.token_hex(8)
         healthy = False
         try:
-            worker.conn.send_bytes(json.dumps({"id": request_id, "sql": prepared.sql}).encode())
+            try:
+                worker.conn.send_bytes(json.dumps({"id": request_id, "sql": prepared.sql}).encode())
+            except OSError:
+                # A worker may die while idle, before we ever start waiting
+                # for its reply. Treat a failed send like a failed receive.
+                logger.exception("query worker send failed (pid %s)", worker.process.pid)
+                raise QueryFailedError(
+                    "crashed", "The query engine stopped unexpectedly. Try again."
+                ) from None
             reply = await self._wait_for_reply(worker, request_id)
             healthy = True
         finally:

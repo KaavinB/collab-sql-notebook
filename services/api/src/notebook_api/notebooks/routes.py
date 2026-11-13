@@ -1,6 +1,6 @@
 """Notebook routes.
 
-Phase 1 has no auth (D10): every route is open, and the API only listens on
+Phase 1 has no auth: every route is open, and the API only listens on
 localhost. Phase 2 adds users, sharing and permission checks to each route.
 """
 
@@ -19,9 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from notebook_api.db.models import CellRun, Notebook, NotebookSnapshot
 from notebook_api.db.session import get_session
 from notebook_api.query.engine import QueryResult
-from notebook_api.query.routes import MAX_SQL_CHARS
 from notebook_api.query.runner import QueryFailedError, QueryRunner
-from notebook_api.query.validate import QueryRejectedError
+from notebook_api.query.validate import MAX_SQL_CHARS, QueryRejectedError
 
 router = APIRouter(prefix="/notebooks")
 
@@ -131,7 +130,7 @@ async def delete_notebook(notebook_id: NotebookId, session: Session) -> Response
     return Response(status_code=204)
 
 
-# --- Yjs snapshot (D7) ---------------------------------------------------------
+# --- Yjs snapshot ---------------------------------------------------------
 
 _YJS_MEDIA_TYPE = "application/octet-stream"
 
@@ -154,8 +153,9 @@ async def put_snapshot(notebook_id: NotebookId, request: Request, session: Sessi
     doesn't decode it in Phase 1. Last write wins, which is fine with one
     writer; Phase 2 moves persistence to the sync server.
     """
-    max_bytes: int = request.app.state.settings.snapshot_max_bytes
-    state = await _read_body_capped(request, max_bytes)
+    # BodyLimitMiddleware enforces the snapshot byte cap before any route or
+    # database dependency runs, including for uploads without Content-Length.
+    state = await request.body()
     if not state:
         raise HTTPException(
             status_code=400, detail={"kind": "invalid", "message": "Empty snapshot."}
@@ -188,33 +188,7 @@ async def put_snapshot(notebook_id: NotebookId, request: Request, session: Sessi
     return Response(status_code=204)
 
 
-async def _read_body_capped(request: Request, max_bytes: int) -> bytes:
-    """Read the body, refusing it as soon as it passes `max_bytes`.
-
-    Streaming the check (instead of reading everything first) means an
-    oversized upload never sits in memory in full.
-    """
-    declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > max_bytes:
-        raise _too_large(max_bytes)
-    chunks: list[bytes] = []
-    size = 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > max_bytes:
-            raise _too_large(max_bytes)
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _too_large(max_bytes: int) -> HTTPException:
-    return HTTPException(
-        status_code=413,
-        detail={"kind": "too_large", "message": f"Snapshot is larger than {max_bytes} bytes."},
-    )
-
-
-# --- Shared cell runs (D6) -----------------------------------------------------
+# --- Shared cell runs -----------------------------------------------------
 
 
 @router.post("/{notebook_id}/cells/{cell_id}/runs", status_code=201)

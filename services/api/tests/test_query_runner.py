@@ -1,6 +1,7 @@
 """Tests for the worker-process pool. These start real worker processes."""
 
 import asyncio
+import json
 import sys
 import threading
 from collections.abc import AsyncIterator
@@ -13,7 +14,7 @@ from notebook_api.query import runner as runner_module
 from notebook_api.query.engine import EngineLimits
 from notebook_api.query.runner import QueryFailedError, QueryRunner, WorkerStartError
 from notebook_api.query.validate import PreparedQuery, QueryRejectedError, prepare_query
-from tests.fixtures import exit_immediately
+from tests.fixtures import exit_immediately, report_worker_environment
 
 pytestmark = pytest.mark.anyio
 
@@ -106,7 +107,7 @@ async def test_query_errors_keep_the_worker(runner: QueryRunner) -> None:
 
 async def test_cooperative_timeout_keeps_the_worker(runner: QueryRunner) -> None:
     # DuckDB's interrupt stops the query and the worker replies "timeout":
-    # its state is known, so it goes back into the pool (D16).
+    # its state is known, so it goes back into the pool.
     before = set(runner._all)
     with pytest.raises(QueryFailedError) as info:
         await runner.run(SLOW)
@@ -148,6 +149,44 @@ async def test_a_crashed_worker_is_reported_and_replaced(runner: QueryRunner) ->
     assert info.value.kind == "crashed"
     await _wait_for_pool_size(runner, 2)
     assert (await runner.run("select 3 as x"))["rows"] == [[3]]
+
+
+async def test_an_idle_worker_death_is_reported_and_replaced(
+    query_db: Path, tmp_path: Path
+) -> None:
+    pool = _runner(query_db, tmp_path / "spill", workers=1)
+    await pool.start()
+    try:
+        (worker,) = pool._all
+        worker.process.kill()
+        await asyncio.to_thread(worker.process.join, 5)
+        with pytest.raises(QueryFailedError) as info:
+            await pool.run("select 1 as x")
+        assert info.value.kind == "crashed"
+        await _wait_for_pool_size(pool, 1)
+        assert worker not in pool._all
+        assert (await pool.run("select 2 as x"))["rows"] == [[2]]
+    finally:
+        await pool.close()
+
+
+async def test_workers_discard_inherited_application_credentials(
+    query_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "private-database-credential")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "private-api-credential")
+    monkeypatch.setattr(runner_module, "worker_main", report_worker_environment)
+    pool = _runner(query_db, tmp_path / "spill", workers=1)
+    await pool.start()
+    try:
+        (worker,) = pool._all
+        names = json.loads((worker.spill_dir / "environment.json").read_text())
+        assert "DATABASE_URL" not in names
+        assert "ANTHROPIC_API_KEY" not in names
+        assert set(names) <= {"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TMP", "TEMP"}
+        assert (await pool.run("select 1 as x"))["rows"] == [[1]]
+    finally:
+        await pool.close()
 
 
 async def test_a_cancelled_request_never_leaks_its_result_to_the_next_one(

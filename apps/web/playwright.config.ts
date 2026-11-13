@@ -3,8 +3,8 @@ import { defineConfig } from "@playwright/test";
 /**
  * End-to-end tests against the real stack: Postgres (`docker compose up -d`),
  * the taxi DuckDB file (`pnpm ingest`), the API and a production build of the
- * web app. Not part of `pnpm check`, which must run without those. Run with
- * `pnpm e2e`.
+ * web app. `pnpm check` needs Postgres for API integration tests, but does
+ * not need the taxi dataset or browser binaries. Run these with `pnpm e2e`.
  *
  * The tests start their own API and web servers on their own ports, from the
  * current code, and never reuse a running server: a dev server on :3000 or an

@@ -11,6 +11,7 @@ Worker -> parent:  {"ready": true} once, at startup (or {"ready": false, "messag
 """
 
 import json
+import os
 import resource
 import signal
 import sys
@@ -23,6 +24,11 @@ from notebook_api.query.engine import EngineLimits, QueryTimeoutError, execute, 
 from notebook_api.query.validate import PreparedQuery
 
 _OUT_OF_MEMORY = "The query needed more memory than a worker is allowed."
+
+# Workers need locale and temporary-directory settings, not database passwords
+# or API keys. Clear inherited application credentials before opening DuckDB.
+# This reduces exposure inside the worker; it isn't an OS security boundary.
+_WORKER_ENV = frozenset({"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TMP", "TEMP"})
 
 
 def _send(conn: Connection, message: dict[str, object]) -> None:
@@ -48,6 +54,9 @@ def cap_process_memory(cap_mb: int) -> bool:
 
 
 def worker_main(conn: Connection, db_path: str, spill_dir: str, limits: EngineLimits) -> None:
+    for name in list(os.environ):
+        if name not in _WORKER_ENV:
+            del os.environ[name]
     # Ctrl-C in the terminal goes to the whole process group. The parent owns
     # shutdown, so workers ignore SIGINT instead of dying mid-reply.
     signal.signal(signal.SIGINT, signal.SIG_IGN)

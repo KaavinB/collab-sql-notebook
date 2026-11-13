@@ -16,7 +16,7 @@ export type RunLoadFailure = "missing" | "error";
 /**
  * Stored runs for one notebook, by run ID, plus each cell's in-flight state.
  *
- * Results live in Postgres (D6); the document only stores each cell's latest
+ * Results live in Postgres; the document only stores each cell's latest
  * run ID. When a cell points at a run this client hasn't seen (for example
  * after a reload), the run is fetched and cached.
  *

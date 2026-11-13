@@ -161,3 +161,42 @@ test("a bar chart over daily timestamps draws visible bars", async ({ page, requ
     await request.delete(`${API}/notebooks/${notebookId}`);
   }
 });
+
+test("chart tooltips show image URLs as text without requesting them", async ({
+  page,
+  request,
+}) => {
+  const created = await request.post(`${API}/notebooks`, {
+    data: { title: `E2E tooltip ${Date.now()}` },
+  });
+  expect(created.status()).toBe(201);
+  const notebookId = (await created.json()).id as string;
+  const url = "https://tracker.example/pixel.png";
+  const trackerRequests: string[] = [];
+  // Intercept the host so a regression can never send a real tracking request.
+  await page.route("https://tracker.example/**", async (route) => {
+    trackerRequests.push(route.request().url());
+    await route.abort();
+  });
+  try {
+    await page.goto(`/notebooks/${notebookId}`);
+    await page.getByRole("button", { name: "+ SQL" }).click();
+    await typeInLastEditor(page, `select '${url}' as image, 10 as title`);
+    await page.getByRole("button", { name: "Run" }).click();
+    await expect(page.getByTestId("result-summary")).toContainText("1 row");
+    await page.getByRole("button", { name: "+ Chart" }).click();
+    await page.getByLabel("Chart data").selectOption({ index: 1 });
+    await page.getByLabel("Chart x").selectOption("image");
+    await page.getByLabel("Chart y").selectOption("title");
+    const bar = page.getByTestId("chart").locator(".mark-rect path");
+    await expect(bar).toHaveCount(1);
+    await bar.hover();
+    const tooltip = page.locator("#vg-tooltip-element");
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toContainText(url);
+    await expect(tooltip.locator("img, iframe, script")).toHaveCount(0);
+    expect(trackerRequests).toEqual([]);
+  } finally {
+    await request.delete(`${API}/notebooks/${notebookId}`);
+  }
+});

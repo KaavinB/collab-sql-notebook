@@ -19,19 +19,22 @@ class Settings(BaseSettings):
     # Localhost by default: Phase 1 has no auth, so the API must not be reachable
     # from the network unless a deployment explicitly sets API_HOST.
     api_host: str = "127.0.0.1"
-    api_port: int = 8000
+    api_port: int = 8010
     # Auto-reload on file changes. Dev only; off unless API_RELOAD=true.
     api_reload: bool = False
+    # Bounds JSON parsing, including unknown fields, before validation runs.
+    # 256 KiB fits 20,000 SQL characters even with JSON's surrogate escaping.
+    api_max_body_bytes: int = Field(default=262_144, ge=1_000)
 
     # --- Database (PostgreSQL) ---
     # SQLAlchemy URL using the psycopg 3 driver. Unset means notebook routes
     # answer 503. Schema changes go through Alembic (`pnpm db:migrate`).
     database_url: str | None = None
-    # Largest Yjs snapshot accepted from a client (D7).
+    # Binary snapshot uploads use this separate limit instead of the JSON cap.
     snapshot_max_bytes: int = Field(default=10_000_000, ge=1_000)
 
-    # --- Query engine (D3, D4, D5) ---
-    # The DuckDB file built by `pnpm ingest`. Unset means /query answers 503.
+    # --- Query engine (read-only worker processes) ---
+    # The DuckDB file built by `pnpm ingest`. Unset means running a cell answers 503.
     # A relative path resolves against the API's working directory
     # (services/api when started with `pnpm dev:api`).
     duckdb_path: Path | None = None
@@ -43,7 +46,7 @@ class Settings(BaseSettings):
     query_workers: int = Field(default=2, ge=1, le=32)
     query_threads_per_worker: int = Field(default=2, ge=1, le=16)
     # DuckDB's own memory_limit, per worker. It governs DuckDB's buffer
-    # manager, not every allocation (D4), so it is not the worker's total.
+    # manager, not every allocation, so it is not the worker's total.
     query_memory_limit_mb: int = Field(default=512, ge=64)
     # Hard cap on each worker's writable memory (RLIMIT_DATA). Enforced on
     # Linux only (production); macOS ignores it. Must leave room above the

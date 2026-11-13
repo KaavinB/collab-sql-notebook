@@ -23,7 +23,7 @@ _FETCH_BATCH_ROWS = 500
 class EngineLimits:
     """Per-worker resource limits. Defaults live in config.Settings."""
 
-    memory_limit_mb: int  # DuckDB's buffer manager (not every allocation; see D4)
+    memory_limit_mb: int  # DuckDB's buffer manager (not every allocation)
     process_memory_cap_mb: int  # OS cap on the whole worker (Linux only; see worker.py)
     threads: int
     max_spill_size_mb: int
@@ -54,7 +54,7 @@ class QueryTimeoutError(Exception):
 def open_connection(
     db_path: Path, spill_dir: Path, limits: EngineLimits
 ) -> duckdb.DuckDBPyConnection:
-    """Open the taxi database with every lockdown layer from D4 applied.
+    """Open the taxi database with the lockdown layers listed below applied.
 
     - read_only: no writes to the database file, whatever the SQL says.
     - enable_external_access=false: no reading or writing other files or URLs
