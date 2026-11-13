@@ -1,33 +1,26 @@
 """Bound request bodies before JSON decoding or dependency execution."""
 
-import re
-
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-_SNAPSHOT_PATH = re.compile(r"^/notebooks/[^/]+/snapshot$")
-
 
 class BodyLimitMiddleware:
-    def __init__(self, app: ASGIApp, max_bytes: int, snapshot_max_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
         self.app = app
         self.max_bytes = max_bytes
-        self.snapshot_max_bytes = snapshot_max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        snapshot = scope["method"] == "PUT" and _SNAPSHOT_PATH.fullmatch(scope["path"])
-        limit = self.snapshot_max_bytes if snapshot else self.max_bytes
+        limit = self.max_bytes
         response = JSONResponse(
             status_code=413,
             content={
                 "detail": {
                     "kind": "too_large",
-                    "message": f"{'Snapshot' if snapshot else 'Request body'} is larger than "
-                    f"{limit} bytes.",
+                    "message": f"Request body is larger than {limit} bytes.",
                 }
             },
         )

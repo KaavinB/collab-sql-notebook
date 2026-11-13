@@ -123,7 +123,7 @@ async def test_parent_kills_a_worker_that_does_not_answer(
 ) -> None:
     # Make the parent's deadline expire before the worker's own interrupt fires,
     # simulating a worker stuck where DuckDB's interrupt can't reach it.
-    monkeypatch.setattr(runner_module, "_KILL_GRACE_SECONDS", -0.4)
+    monkeypatch.setattr(runner_module, "KILL_GRACE_SECONDS", -0.4)
     before = set(runner._all)
     with pytest.raises(QueryFailedError) as info:
         await runner.run(SLOW)

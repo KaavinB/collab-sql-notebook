@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { useSession } from "@/components/auth/SessionGate";
 import { ApiError, type AcceptedShareLink } from "@/lib/api";
+import { forgetShareToken } from "@/lib/pendingShare";
 
 // The API's tokens are 43 base64url characters. Anything else can't be one,
 // so it isn't sent to the server at all.
@@ -22,17 +23,23 @@ export function AcceptShareLink({ token }: { token: string }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   // React runs effects twice in development (StrictMode). The request is
-  // made once and both runs wait for the same promise.
-  const accepting = useRef<Promise<AcceptedShareLink> | null>(null);
+  // made once and both runs wait for the same promise; it's keyed by the
+  // token, so a different token is never answered by an older request.
+  const accepting = useRef<{ token: string; promise: Promise<AcceptedShareLink> } | null>(null);
   const wellFormed = TOKEN.test(token);
 
   useEffect(() => {
     if (!wellFormed) return;
     let cancelled = false;
-    accepting.current ??= api.acceptShareLink(token);
-    accepting.current.then(
+    if (accepting.current?.token !== token) {
+      accepting.current = { token, promise: api.acceptShareLink(token) };
+    }
+    accepting.current.promise.then(
       // replace, not push: Back shouldn't return to this page and accept again.
-      ({ notebook_id }) => !cancelled && router.replace(`/notebooks/${notebook_id}`),
+      ({ notebook_id }) => {
+        forgetShareToken();
+        if (!cancelled) router.replace(`/notebooks/${notebook_id}`);
+      },
       (e: unknown) =>
         !cancelled && setError(e instanceof ApiError ? e.message : "Could not open the link."),
     );

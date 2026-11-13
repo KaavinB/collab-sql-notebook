@@ -358,6 +358,12 @@ function Members({
           );
         })}
       </ul>
+      {isOwner && members.some((member) => member.role !== "owner") && (
+        <p className="text-xs text-zinc-500" data-testid="remove-note">
+          Removing someone doesn&apos;t revoke the links they used. Revoke those too, or they can
+          join again.
+        </p>
+      )}
       {!isOwner &&
         (confirmingLeave ? (
           <div className="flex items-center gap-2 text-xs">

@@ -135,3 +135,20 @@ def test_json_bodies_are_capped_before_validation(path: str) -> None:
     assert response.status_code == 413
     assert response.json()["detail"]["kind"] == "too_large"
     assert response.headers["access-control-allow-origin"] == ALLOWED
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "AUTH_SECRET",
+        "SYNC_TICKET_SECRET",
+        "GITHUB_CLIENT_ID",
+        "GITHUB_CLIENT_SECRET",
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+    ],
+)
+def test_an_empty_optional_setting_means_unset(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    # .env.example lists these as `NAME=`; copying it must still start the API.
+    monkeypatch.setenv(name, "")
+    assert getattr(Settings(), name.lower()) is None

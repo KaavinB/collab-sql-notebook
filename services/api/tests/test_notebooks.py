@@ -4,7 +4,6 @@ import threading
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +20,6 @@ from notebook_api.query.runner import QueryFailedError
 from notebook_api.query.validate import MAX_SQL_CHARS
 from tests.fixtures import auth_settings, browser, sign_in
 
-SNAPSHOT_MAX = 2_000
-
 
 @pytest.fixture
 def client(clean_db: str, query_db: Path, tmp_path: Path) -> Iterator[TestClient]:
@@ -33,7 +30,6 @@ def client(clean_db: str, query_db: Path, tmp_path: Path) -> Iterator[TestClient
         query_workers=1,
         query_row_limit=50,
         query_timeout_seconds=0.5,
-        snapshot_max_bytes=SNAPSHOT_MAX,
     )
     with browser(create_app(settings)) as test_client:
         sign_in(test_client)
@@ -70,9 +66,11 @@ def test_list_is_most_recently_updated_first(client: TestClient) -> None:
     first = _create(client, "first")
     _create(client, "second")
     assert [n["title"] for n in client.get("/notebooks").json()] == ["second", "first"]
-    # Saving content counts as an update, so "first" moves to the top.
-    client.put(f"/notebooks/{first['id']}/snapshot", content=b"\x01")
-    assert [n["title"] for n in client.get("/notebooks").json()] == ["first", "second"]
+    # Renaming counts as an update, so "first" moves to the top. (Content
+    # edits do too: the sync server bumps updated_at when it stores them.)
+    client.patch(f"/notebooks/{first['id']}", json={"title": "first (renamed)"})
+    titles = [n["title"] for n in client.get("/notebooks").json()]
+    assert titles == ["first (renamed)", "second"]
 
 
 @pytest.mark.parametrize("title", ["", "x" * 201])
@@ -94,76 +92,18 @@ def test_unknown_and_malformed_ids(client: TestClient) -> None:
     assert client.delete(f"/notebooks/{uuid.uuid4()}").status_code == 404
 
 
-# --- snapshots -------------------------------------------------------------
-
-
-def test_snapshot_is_empty_until_saved_then_round_trips(client: TestClient) -> None:
-    notebook_id = _create(client)["id"]
-    assert client.get(f"/notebooks/{notebook_id}/snapshot").status_code == 204
-
-    state = bytes(range(256))
-    assert client.put(f"/notebooks/{notebook_id}/snapshot", content=state).status_code == 204
-    response = client.get(f"/notebooks/{notebook_id}/snapshot")
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "application/octet-stream"
-    assert response.content == state
-
-    client.put(f"/notebooks/{notebook_id}/snapshot", content=b"newer")
-    assert client.get(f"/notebooks/{notebook_id}/snapshot").content == b"newer"
-
-
-def test_snapshot_save_bumps_updated_at(client: TestClient) -> None:
-    created = _create(client)
-    client.put(f"/notebooks/{created['id']}/snapshot", content=b"\x01")
-    after = client.get(f"/notebooks/{created['id']}").json()
-    # Compare as datetimes: as strings, a timestamp with zero microseconds
-    # ("...:00Z") sorts after one with some ("...:00.0005Z").
-    assert datetime.fromisoformat(after["updated_at"]) > datetime.fromisoformat(
-        created["updated_at"]
-    )
-
-
-def test_snapshot_size_limit(client: TestClient) -> None:
-    notebook_id = _create(client)["id"]
-    url = f"/notebooks/{notebook_id}/snapshot"
-    assert client.put(url, content=b"x" * SNAPSHOT_MAX).status_code == 204
-    too_big = client.put(url, content=b"x" * (SNAPSHOT_MAX + 1))
-    assert too_big.status_code == 413
-    assert too_big.json()["detail"]["kind"] == "too_large"
-    assert client.get(url).content == b"x" * SNAPSHOT_MAX  # unchanged
-
-
-def test_snapshot_size_limit_holds_without_content_length(client: TestClient) -> None:
-    # A chunked upload has no Content-Length; the streamed count still applies.
-    notebook_id = _create(client)["id"]
-
-    def chunks() -> Iterator[bytes]:
-        for _ in range(SNAPSHOT_MAX // 100 + 1):
-            yield b"x" * 100
-
-    response = client.put(f"/notebooks/{notebook_id}/snapshot", content=chunks())
-    assert response.status_code == 413
-
-
-def test_empty_snapshot_is_rejected(client: TestClient) -> None:
-    notebook_id = _create(client)["id"]
-    assert client.put(f"/notebooks/{notebook_id}/snapshot", content=b"").status_code == 400
-
-
-def test_snapshot_of_unknown_notebook(client: TestClient) -> None:
-    url = f"/notebooks/{uuid.uuid4()}/snapshot"
-    assert client.get(url).status_code == 404
-    assert client.put(url, content=b"\x01").status_code == 404
-
-
 def test_deleting_a_notebook_removes_its_snapshot_and_runs(
     client: TestClient, clean_db: str
 ) -> None:
     notebook_id = _create(client)["id"]
-    client.put(f"/notebooks/{notebook_id}/snapshot", content=b"\x01")
+    engine = sa.create_engine(clean_db)
+    with engine.begin() as conn:  # the sync server writes this table
+        conn.execute(
+            sa.text("INSERT INTO notebook_snapshots (notebook_id, state) VALUES (:id, '\\x01')"),
+            {"id": notebook_id},
+        )
     client.post(f"/notebooks/{notebook_id}/cells/c1/runs", json={"sql": "select 1"})
     client.delete(f"/notebooks/{notebook_id}")
-    engine = sa.create_engine(clean_db)
     with engine.connect() as conn:
         for table in ("notebook_snapshots", "cell_runs"):
             assert conn.execute(sa.text(f"SELECT count(*) FROM {table}")).scalar() == 0
@@ -309,22 +249,6 @@ def test_routes_answer_503_without_a_database() -> None:
     assert response.json()["detail"]["kind"] == "unavailable"
 
 
-def test_concurrent_first_snapshot_saves_do_not_collide(client: TestClient) -> None:
-    # Two tabs opening a new notebook both save before either has a row.
-    for _ in range(5):
-        notebook_id = _create(client)["id"]
-        url = f"/notebooks/{notebook_id}/snapshot"
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            codes = list(
-                pool.map(
-                    lambda i, url=url: client.put(url, content=bytes([i + 1])).status_code,
-                    range(4),
-                )
-            )
-        assert codes == [204, 204, 204, 204]
-        assert client.get(url).content in {b"\x01", b"\x02", b"\x03", b"\x04"}
-
-
 class _Gate:
     def __init__(self) -> None:
         self.entered = threading.Event()  # the slow request is inside the runner
@@ -427,32 +351,6 @@ def test_deleting_a_notebook_while_its_cell_runs_returns_404(
         response = slow.result(timeout=30)
     assert response.status_code == 404
     assert response.json()["detail"]["kind"] == "not_found"
-
-
-def test_deleting_a_notebook_while_snapshots_are_being_saved(client: TestClient) -> None:
-    # A tab keeps saving (debounced) while someone deletes the notebook. The
-    # delete must always succeed, and saves must be 204 (before) or 404 (after),
-    # never a deadlock or foreign-key error.
-    for _ in range(20):
-        notebook_id = _create(client)["id"]
-        url = f"/notebooks/{notebook_id}/snapshot"
-        client.put(url, content=b"\x00")  # the snapshot row already exists
-        start = threading.Barrier(4)
-
-        def save(i: int, url: str = url, start: threading.Barrier = start) -> int:
-            start.wait()
-            return client.put(url, content=bytes([i + 1])).status_code
-
-        def remove(notebook_id: str = notebook_id, start: threading.Barrier = start) -> int:
-            start.wait()
-            return client.delete(f"/notebooks/{notebook_id}").status_code
-
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            saves = [pool.submit(save, i) for i in range(3)]
-            deleted = pool.submit(remove)
-            assert deleted.result(timeout=30) == 204
-            assert {f.result(timeout=30) for f in saves} <= {204, 404}
-        assert client.get(f"/notebooks/{notebook_id}").status_code == 404
 
 
 def test_constraint_bugs_in_run_storage_are_not_reported_as_not_found(

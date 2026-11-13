@@ -103,16 +103,12 @@ describe("api client", () => {
   });
 
   it("maps a failure while reading the body like a transport failure", async () => {
-    const broken = (read: "text" | "arrayBuffer") => {
-      const response = new Response("x");
-      Object.defineProperty(response, read, {
-        value: () => Promise.reject(new DOMException("timed out", "TimeoutError")),
-      });
-      return response;
-    };
-    const { api } = client(broken("text"), broken("arrayBuffer"));
+    const response = new Response("x");
+    Object.defineProperty(response, "text", {
+      value: () => Promise.reject(new DOMException("timed out", "TimeoutError")),
+    });
+    const { api } = client(response);
     await expect(api.listNotebooks()).rejects.toMatchObject({ kind: "timeout" });
-    await expect(api.loadSnapshot(NOTEBOOK.id)).rejects.toMatchObject({ kind: "timeout" });
   });
 
   it("rejects a run whose status doesn't match its result", async () => {
@@ -133,25 +129,6 @@ describe("api client", () => {
     await expect(api.runCell(NOTEBOOK.id, "c1", "select 1")).rejects.toMatchObject({
       kind: "invalid_response",
     });
-  });
-
-  it("loads a missing snapshot as null and a saved one as bytes", async () => {
-    const { api } = client(
-      new Response(null, { status: 204 }),
-      new Response(new Uint8Array([1, 2, 3])),
-    );
-    expect(await api.loadSnapshot(NOTEBOOK.id)).toBeNull();
-    expect(await api.loadSnapshot(NOTEBOOK.id)).toEqual(new Uint8Array([1, 2, 3]));
-  });
-
-  it("saves a snapshot as raw bytes", async () => {
-    const { api, fetchMock } = client(new Response(null, { status: 204 }));
-    await api.saveSnapshot(NOTEBOOK.id, new Uint8Array([9]));
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(`${BASE}/notebooks/${NOTEBOOK.id}/snapshot`);
-    expect(init?.method).toBe("PUT");
-    expect(new Headers(init?.headers).get("Content-Type")).toBe("application/octet-stream");
-    expect(init?.body).toEqual(new Uint8Array([9]));
   });
 
   it("runs a cell and validates the stored run", async () => {

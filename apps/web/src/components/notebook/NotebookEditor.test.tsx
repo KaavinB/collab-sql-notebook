@@ -1,12 +1,21 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  configure,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 
 import { NotebookEditor } from "@/components/notebook/NotebookEditor";
 import { ApiError, type ApiClient, type Notebook } from "@/lib/api";
-import { appendCell, orderedCells, setLastRun } from "@/lib/notebook/doc";
-import { deferred, fakeApi, NOTEBOOK } from "@/test/fakeApi";
+import { appendCell, cellsMap, orderedCells, setLastRun } from "@/lib/notebook/doc";
+import { fakeApi, NOTEBOOK } from "@/test/fakeApi";
+import { fakeProviders } from "@/test/fakeSync";
 
 // CodeMirror needs real layout APIs that jsdom lacks; the editor binding is
 // covered by the Playwright tests. Here it's a stand-in that shows the text.
@@ -26,6 +35,11 @@ vi.mock("next/link", () => ({
 
 afterEach(cleanup);
 
+// The whole notebook renders in each test; under a loaded machine (the web and
+// sync suites run in parallel) the default 1 s for findBy/waitFor was seen to
+// be too short once.
+configure({ asyncUtilTimeout: 5_000 });
+
 function storedDocWithMarkdown(text: string): Uint8Array {
   const doc = new Y.Doc();
   appendCell(doc, "markdown", "stored");
@@ -33,67 +47,116 @@ function storedDocWithMarkdown(text: string): Uint8Array {
   return Y.encodeStateAsUpdate(doc);
 }
 
-function textsIn(state: Uint8Array): string[] {
-  const doc = new Y.Doc();
-  Y.applyUpdate(doc, state);
-  return orderedCells(doc).map((c) => c.source?.toString() ?? "");
+/** Renders the editor with a fake sync server; returns the API fake and the providers. */
+function renderEditor(overrides: Parameters<typeof fakeApi>[0] = {}) {
+  const api = fakeApi(overrides);
+  const providers = fakeProviders();
+  render(<NotebookEditor notebookId={NOTEBOOK.id} api={api} createProvider={providers.factory} />);
+  /** Waits for the connection, then delivers the server's document. */
+  const serve = async (state?: Uint8Array) => {
+    await waitFor(() => expect(providers.created).toHaveLength(1));
+    act(() => providers.latest().serve(state));
+  };
+  return { api, providers, serve };
 }
 
 describe("NotebookEditor", () => {
-  it("never saves before the stored document is loaded, and keeps it when saving", async () => {
-    const snapshot = deferred<Uint8Array | null>();
-    const saveSnapshot = vi.fn<ApiClient["saveSnapshot"]>(async () => {});
-    const api = fakeApi({ loadSnapshot: () => snapshot.promise, saveSnapshot });
-    render(<NotebookEditor notebookId={NOTEBOOK.id} api={api} />);
-    expect(screen.getByText("Loading notebook…")).toBeTruthy();
+  it("shows the document only once the sync server has delivered it", async () => {
+    const { serve } = renderEditor();
+    expect(await screen.findByText("Connecting…")).toBeTruthy();
+    await serve(storedDocWithMarkdown("# Stored work"));
+    expect(await screen.findByRole("heading", { name: "Stored work" })).toBeTruthy();
+    expect(screen.getByTestId("sync-status").textContent).toBe("Live");
+  });
 
-    await act(async () => snapshot.resolve(storedDocWithMarkdown("# Stored work")));
-    await screen.findByRole("button", { name: "+ SQL" });
-    expect(saveSnapshot).not.toHaveBeenCalled(); // loading alone saves nothing
+  it("shows a collaborator's edit as it arrives", async () => {
+    const { providers, serve } = renderEditor();
+    await serve();
+    expect(await screen.findByText(/This notebook is empty/)).toBeTruthy();
+    act(() => providers.latest().remote(storedDocWithMarkdown("# From Ada")));
+    expect(await screen.findByRole("heading", { name: "From Ada" })).toBeTruthy();
+  });
 
+  it("keeps the notebook editable while offline, and says so", async () => {
+    const { providers, serve } = renderEditor();
+    await serve();
+    act(() => providers.latest().drop());
+    expect(screen.getByTestId("sync-status").textContent).toMatch(/^Offline/);
     fireEvent.click(screen.getByRole("button", { name: "+ SQL" }));
-    await waitFor(() => expect(saveSnapshot).toHaveBeenCalled(), { timeout: 3000 });
-    const saved = saveSnapshot.mock.calls.at(-1)![1];
-    expect(textsIn(saved)).toEqual(["# Stored work", ""]);
+    expect(await screen.findByTestId("editor")).toBeTruthy();
   });
 
-  it("says plainly when a save can't succeed, and stops retrying", async () => {
-    const api = fakeApi({
-      saveSnapshot: vi.fn(async () => {
-        throw new ApiError(404, "not_found", "Notebook not found.");
-      }),
-    });
-    render(<NotebookEditor notebookId={NOTEBOOK.id} api={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "+ SQL" }));
-    await waitFor(
-      () =>
-        expect(screen.getByTestId("save-status").textContent).toBe(
-          "Not saved: Notebook not found.",
-        ),
-      { timeout: 3000 },
+  it("turns view-only with the reason when the notebook is deleted", async () => {
+    const { providers, serve } = renderEditor();
+    await serve(storedDocWithMarkdown("# Notes"));
+    act(() => providers.latest().close(4404));
+    expect((await screen.findByTestId("sync-status")).textContent).toBe(
+      "This notebook was deleted.",
     );
-    expect(screen.getByTestId("save-status").getAttribute("role")).toBe("alert");
-    await new Promise((resolve) => setTimeout(resolve, 1500)); // past the first retry delay
-    expect(api.saveSnapshot).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "+ SQL" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Notes" })).toBeTruthy(); // still readable
   });
 
-  it("says it's retrying when the failure is temporary", async () => {
-    const api = fakeApi({
-      saveSnapshot: vi.fn(async () => {
-        throw new ApiError(503, "busy", "busy");
+  it("follows a role change pushed by the server", async () => {
+    const syncTicket = vi
+      .fn<ApiClient["syncTicket"]>()
+      .mockResolvedValueOnce({ ticket: "t1", url: "ws://sync.test", role: "editor" })
+      .mockResolvedValueOnce({ ticket: "t2", url: "ws://sync.test", role: "viewer" });
+    const { providers, serve } = renderEditor({ syncTicket });
+    await serve();
+    expect(await screen.findByRole("button", { name: "+ SQL" })).toBeTruthy();
+    act(() => providers.latest().close(4403));
+    await waitFor(() => expect(screen.getByTestId("view-only")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: "+ SQL" })).toBeNull();
+  });
+
+  it("explains why it can't connect at all", async () => {
+    renderEditor({
+      syncTicket: vi.fn<ApiClient["syncTicket"]>(async () => {
+        throw new ApiError(503, "unavailable", "Live collaboration is not configured.");
       }),
     });
-    render(<NotebookEditor notebookId={NOTEBOOK.id} api={api} />);
-    fireEvent.click(await screen.findByRole("button", { name: "+ SQL" }));
-    await waitFor(
-      () => expect(screen.getByTestId("save-status").textContent).toBe("Not saved — retrying"),
-      { timeout: 3000 },
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Live collaboration is not configured.",
     );
+  });
+
+  it("shows a run someone else started, until its lock expires", async () => {
+    const doc = new Y.Doc();
+    appendCell(doc, "sql", "sql-1");
+    // Long enough to render under a loaded test machine, short enough to wait out.
+    const expiresAt = new Date(Date.now() + 1_500).toISOString();
+    cellsMap(doc).get("sql-1")!.set("running", {
+      executionId: "e1",
+      by: "Grace",
+      startedAt: new Date().toISOString(),
+      expiresAt,
+    });
+    const { serve } = renderEditor();
+    await serve(Y.encodeStateAsUpdate(doc));
+    expect(await screen.findByText("Running… (started by Grace)")).toBeTruthy();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Running…" }).disabled).toBe(true);
+    await waitFor(() => expect(screen.queryByText(/started by Grace/)).toBeNull(), {
+      timeout: 5000,
+    });
+    expect(screen.getByRole("button", { name: "Run" })).toBeTruthy();
+  });
+
+  it("shows who is here", async () => {
+    const { providers, serve } = renderEditor();
+    await serve();
+    const awareness = providers.latest().awareness;
+    act(() =>
+      awareness.setLocalState({ user: { id: "u1", name: "Ada Lovelace", color: "#2563eb" } }),
+    );
+    const list = await screen.findByRole("list", { name: "People in this notebook" });
+    expect(list.textContent).toBe("AL");
+    expect(screen.getByLabelText("Ada Lovelace (you)")).toBeTruthy();
   });
 
   it("renames on blur and reverts on Escape", async () => {
-    const api = fakeApi();
-    render(<NotebookEditor notebookId={NOTEBOOK.id} api={api} />);
+    const { api, serve } = renderEditor();
+    await serve();
     const title = await screen.findByLabelText<HTMLInputElement>("Notebook title");
 
     fireEvent.change(title, { target: { value: "Tips by borough" } });
@@ -121,17 +184,17 @@ describe("NotebookEditor", () => {
       return Y.encodeStateAsUpdate(doc);
     }
 
-    function renderAs(role: Notebook["role"]) {
-      const api = fakeApi({
+    async function renderAs(role: Notebook["role"]) {
+      const { api, serve } = renderEditor({
         getNotebook: async () => ({ ...NOTEBOOK, role }),
-        loadSnapshot: async () => storedDocWithEveryCellType(),
+        syncTicket: async () => ({ ticket: "t", url: "ws://sync.test", role }),
       });
-      render(<NotebookEditor notebookId={NOTEBOOK.id} api={api} />);
+      await serve(storedDocWithEveryCellType());
       return api;
     }
 
     it("gives a viewer a read-only notebook", async () => {
-      const api = renderAs("viewer");
+      const api = await renderAs("viewer");
       expect((await screen.findByTestId("view-only")).textContent).toBe("View only");
       expect(screen.getByRole("heading", { name: NOTEBOOK.title })).toBeTruthy();
       expect(screen.queryByLabelText("Notebook title")).toBeNull();
@@ -150,11 +213,10 @@ describe("NotebookEditor", () => {
       // They can still see the last result and the members.
       await waitFor(() => expect(api.getRun).toHaveBeenCalledWith(NOTEBOOK.id, "r1"));
       expect(screen.getByRole("button", { name: "Members" })).toBeTruthy();
-      expect(api.saveSnapshot).not.toHaveBeenCalled();
     });
 
     it.each(["editor", "owner"] as const)("lets an %s edit and run", async (role) => {
-      renderAs(role);
+      await renderAs(role);
       expect(await screen.findByLabelText("Notebook title")).toBeTruthy();
       expect(screen.queryByTestId("view-only")).toBeNull();
       expect(screen.getByRole("button", { name: "Run" })).toBeTruthy();
@@ -174,7 +236,13 @@ describe("NotebookEditor", () => {
         throw new ApiError(404, "not_found", "Notebook not found.");
       },
     });
-    render(<NotebookEditor notebookId={NOTEBOOK.id} api={api} />);
+    render(
+      <NotebookEditor
+        notebookId={NOTEBOOK.id}
+        api={api}
+        createProvider={fakeProviders().factory}
+      />,
+    );
     expect((await screen.findByRole("alert")).textContent).toBe("Notebook not found.");
   });
 });

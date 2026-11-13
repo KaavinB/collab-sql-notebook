@@ -1,4 +1,7 @@
-"""Notebook routes: the notebooks themselves, their Yjs snapshot and cell runs.
+"""Notebook routes: the notebooks themselves and their cell runs.
+
+A notebook's content (its Yjs document) is never read or written here: the
+sync server is its only reader and writer.
 
 Every route needs a signed-in user who is a member of the notebook; see
 access.py for what each role may do.
@@ -11,12 +14,11 @@ from typing import Annotated, Literal, cast
 from fastapi import APIRouter, HTTPException, Path, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select
 
 from notebook_api import events
 from notebook_api.auth.sessions import CurrentUser
-from notebook_api.db.models import CellRun, Notebook, NotebookMember, NotebookSnapshot
+from notebook_api.db.models import CellRun, Notebook, NotebookMember
 from notebook_api.notebooks.access import (
     NotebookId,
     Role,
@@ -136,67 +138,6 @@ async def delete_notebook(notebook_id: NotebookId, user: CurrentUser, session: S
     if deleted is None:  # deleted by another request a moment ago
         raise not_found()
     await events.notify(session, events.notebook_deleted(notebook_id))
-    await session.commit()
-    return Response(status_code=204)
-
-
-# --- Yjs snapshot ---------------------------------------------------------
-
-_YJS_MEDIA_TYPE = "application/octet-stream"
-
-
-@router.get("/{notebook_id}/snapshot")
-async def get_snapshot(notebook_id: NotebookId, user: CurrentUser, session: Session) -> Response:
-    """The notebook's Yjs state, or 204 if nothing has been saved yet."""
-    await membership(session, notebook_id, user.id)
-    snapshot = await session.get(NotebookSnapshot, notebook_id)
-    if snapshot is None:
-        return Response(status_code=204)
-    return Response(content=snapshot.state, media_type=_YJS_MEDIA_TYPE)
-
-
-@router.put("/{notebook_id}/snapshot", status_code=204)
-async def put_snapshot(
-    notebook_id: NotebookId, request: Request, user: CurrentUser, session: Session
-) -> Response:
-    """Replace the notebook's Yjs state with the request body.
-
-    The body is `Y.encodeStateAsUpdate(doc)` from the client. The server
-    doesn't decode it in Phase 1. Last write wins, which is fine with one
-    writer; Phase 2 moves persistence to the sync server.
-    """
-    # BodyLimitMiddleware enforces the snapshot byte cap before any route or
-    # database dependency runs, including for uploads without Content-Length.
-    await membership(session, notebook_id, user.id, "editor")
-    state = await request.body()
-    if not state:
-        raise HTTPException(
-            status_code=400, detail={"kind": "invalid", "message": "Empty snapshot."}
-        )
-    # Lock order matters. DELETE /notebooks locks the notebook row, then (by
-    # ON DELETE CASCADE) the snapshot row. Saving takes them in the same order
-    # (notebook first, then snapshot), so the two can't deadlock. Updating
-    # the notebook row first also serves as the existence check: if the
-    # notebook was just deleted, no row comes back and this is a clean 404.
-    touched = await session.execute(
-        update(Notebook)
-        .where(Notebook.id == notebook_id)
-        # Saving content counts as updating the notebook ("recent" ordering).
-        .values(updated_at=func.now())
-        .returning(Notebook.id)
-    )
-    if touched.first() is None:
-        await session.rollback()
-        raise not_found()
-    # One atomic upsert: two first saves at the same moment (two tabs opening a
-    # new notebook) can't both try to INSERT and collide on the primary key.
-    upsert = pg_insert(NotebookSnapshot).values(notebook_id=notebook_id, state=state)
-    await session.execute(
-        upsert.on_conflict_do_update(
-            index_elements=[NotebookSnapshot.notebook_id],
-            set_={"state": upsert.excluded.state, "updated_at": func.now()},
-        )
-    )
     await session.commit()
     return Response(status_code=204)
 

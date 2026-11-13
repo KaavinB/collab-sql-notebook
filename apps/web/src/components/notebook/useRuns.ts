@@ -6,8 +6,11 @@ import { ApiError, type ApiClient, type Run } from "@/lib/api";
 
 export type RunState =
   | { status: "idle" }
-  /** `ignoredSubmit`: the user pressed Run again while this run was in flight. */
-  | { status: "running"; ignoredSubmit?: boolean }
+  /**
+   * `ignoredSubmit`: the user pressed Run again while this run was in flight.
+   * `by`: someone else started it (shown from the shared document).
+   */
+  | { status: "running"; ignoredSubmit?: boolean; by?: string }
   | { status: "failed"; message: string };
 
 /** Why a run the document points at couldn't be shown. */

@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 
 # How long past the query timeout the parent waits for an answer before it
 # kills the worker. Covers the interrupt taking effect plus sending the reply.
-_KILL_GRACE_SECONDS = 2.0
+# Public: the per-cell execution lock's lifetime is built from it.
+KILL_GRACE_SECONDS = 2.0
 _WORKER_START_TIMEOUT_SECONDS = 30.0
 _RESPAWN_BACKOFF_MAX_SECONDS = 10.0
 _SPILL_DIR_PREFIX = "worker-"
@@ -220,7 +221,7 @@ class QueryRunner:
         raise QueryFailedError(reply["kind"], reply["message"])
 
     async def _wait_for_reply(self, worker: _Worker, request_id: str) -> dict[str, Any]:
-        deadline = self._limits.timeout_seconds + _KILL_GRACE_SECONDS
+        deadline = self._limits.timeout_seconds + KILL_GRACE_SECONDS
         try:
             raw = await self._receive(worker.conn, deadline, self._max_reply_bytes)
         except EOFError, OSError:

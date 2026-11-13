@@ -5,14 +5,11 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 
 import { SignIn } from "@/components/auth/SignIn";
 import { ApiError, createApiClient, type ApiClient, type User } from "@/lib/api";
-import { settlePendingWork } from "@/lib/pendingWork";
 
 type SessionState =
   | { status: "loading" }
   | { status: "signed-out" }
   | { status: "signed-in"; user: User }
-  /** Children are unmounted; waiting for their final saves, then logging out. */
-  | { status: "signing-out" }
   | { status: "error"; message: string };
 
 interface SessionValue {
@@ -22,6 +19,11 @@ interface SessionValue {
 }
 
 const SessionContext = createContext<SessionValue | null>(null);
+
+/** The signed-in user, or null outside <SessionGate> (e.g. in component tests). */
+export function useOptionalSession(): SessionValue | null {
+  return useContext(SessionContext);
+}
 
 /** The signed-in user. Only usable inside <SessionGate>. */
 export function useSession(): SessionValue {
@@ -38,9 +40,12 @@ export function useSession(): SessionValue {
 export function SessionGate({
   children,
   api: injected,
+  signInNext,
 }: {
   children: React.ReactNode;
   api?: ApiClient;
+  /** Where to come back to after signing in; defaults to the current page. */
+  signInNext?: string;
 }) {
   const api = useMemo(() => injected ?? createApiClient(), [injected]);
   const pathname = usePathname();
@@ -65,31 +70,17 @@ export function SessionGate({
     };
   }, [api]);
 
-  // Unmount the signed-in pages first: that starts their final saves.
-  const signOut = useCallback(async () => setState({ status: "signing-out" }), []);
-
-  useEffect(() => {
-    if (state.status !== "signing-out") return;
-    let cancelled = false;
-    (async () => {
-      // Then let those saves finish while the session still exists, and only
-      // then end it. (In the other order they'd fail as unauthenticated.)
-      await settlePendingWork();
-      try {
-        await api.logout();
-        if (!cancelled) setState({ status: "signed-out" });
-      } catch (error) {
-        if (!cancelled)
-          setState({
-            status: "error",
-            message: error instanceof ApiError ? error.message : "Could not sign out.",
-          });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [state.status, api]);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
+  const signOut = useCallback(async () => {
+    try {
+      await api.logout();
+      setSignOutError(null);
+      setState({ status: "signed-out" });
+    } catch (error) {
+      // Still signed in: stay on the page and say so, so the user can retry.
+      setSignOutError(error instanceof ApiError ? error.message : "Could not sign out.");
+    }
+  }, [api]);
 
   const value = useMemo(
     () => (state.status === "signed-in" ? { user: state.user, api, signOut } : null),
@@ -97,7 +88,6 @@ export function SessionGate({
   );
 
   if (state.status === "loading") return <p className="text-sm text-zinc-500">Loading…</p>;
-  if (state.status === "signing-out") return <p className="text-sm text-zinc-500">Signing out…</p>;
   if (state.status === "error")
     return (
       <p role="alert" className="text-sm text-red-600">
@@ -108,7 +98,7 @@ export function SessionGate({
     return (
       <SignIn
         api={api}
-        next={pathname}
+        next={signInNext ?? pathname}
         onSignedIn={(user) => setState({ status: "signed-in", user })}
       />
     );
@@ -116,6 +106,11 @@ export function SessionGate({
     <SessionContext.Provider value={value}>
       <div className="mb-4 flex items-center justify-end gap-3 text-sm text-zinc-500">
         <span data-testid="signed-in-as">{value.user.name}</span>
+        {signOutError && (
+          <span role="alert" className="text-red-600">
+            {signOutError}
+          </span>
+        )}
         <button className="underline" onClick={() => void signOut()}>
           Sign out
         </button>

@@ -32,8 +32,6 @@ class Settings(BaseSettings):
     # SQLAlchemy URL using the psycopg 3 driver. Unset means notebook routes
     # answer 503. Schema changes go through Alembic (`pnpm db:migrate`).
     database_url: str | None = None
-    # Binary snapshot uploads use this separate limit instead of the JSON cap.
-    snapshot_max_bytes: int = Field(default=10_000_000, ge=1_000)
 
     # --- Query engine (read-only worker processes) ---
     # The DuckDB file built by `pnpm ingest`. Unset means running a cell answers 503.
@@ -102,6 +100,23 @@ class Settings(BaseSettings):
     # The sync server's WebSocket URL as browsers reach it (ws:// or wss://).
     # Handed to the browser together with each ticket.
     sync_public_url: str = "ws://localhost:8020"
+
+    @field_validator(
+        "auth_secret",
+        "github_client_id",
+        "github_client_secret",
+        "google_client_id",
+        "google_client_secret",
+        "sync_ticket_secret",
+        mode="before",
+    )
+    @classmethod
+    def _blank_means_unset(cls, value: object) -> object:
+        # .env.example lists these with empty values; an empty line means
+        # "not configured", not "configured with an empty secret".
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("web_url", "api_public_url")
     @classmethod

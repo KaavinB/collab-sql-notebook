@@ -47,7 +47,11 @@ def run_started(
     execution_id: uuid.UUID,
     user_name: str,
     started_at: datetime,
+    expires_at: datetime,
 ) -> dict[str, Any]:
+    """`expires_at` is when the execution's lock lapses. If the API process
+    running it dies, no run_finished ever comes; past this time, everyone can
+    treat the run as over."""
     return {
         "type": "run_started",
         "notebook_id": str(notebook_id),
@@ -55,6 +59,7 @@ def run_started(
         "execution_id": str(execution_id),
         "user_name": user_name,
         "started_at": started_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
     }
 
 

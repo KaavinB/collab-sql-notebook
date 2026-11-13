@@ -51,8 +51,6 @@ export function fakeApi(overrides: Partial<ApiClient> = {}) {
       title,
     })),
     deleteNotebook: vi.fn<ApiClient["deleteNotebook"]>(async () => {}),
-    loadSnapshot: vi.fn<ApiClient["loadSnapshot"]>(async () => null),
-    saveSnapshot: vi.fn<ApiClient["saveSnapshot"]>(async () => {}),
     runCell: vi.fn<ApiClient["runCell"]>(async () => okRun("r1", 1)),
     getRun: vi.fn<ApiClient["getRun"]>(async (_nb, id) => okRun(id, 1)),
     createShareLink: vi.fn<ApiClient["createShareLink"]>(async (_nb, role) => ({

@@ -84,7 +84,6 @@ def create_app(
     app.add_middleware(
         BodyLimitMiddleware,
         max_bytes=settings.api_max_body_bytes,
-        snapshot_max_bytes=settings.snapshot_max_bytes,
     )
     # The middleware added last runs first: CORS, then the Host check, then
     # the Origin check, then the body cap. CORS is outermost so even refusals

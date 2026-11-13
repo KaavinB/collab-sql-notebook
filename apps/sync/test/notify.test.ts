@@ -17,6 +17,7 @@ import {
   newPool,
   rawSocket,
   settled,
+  sleep,
   startServer,
   storedDoc,
   synced,
@@ -93,6 +94,27 @@ function finished(nb: string, executionId: string, runId: string | null, cellId 
 }
 
 describe("run events", () => {
+  it("records when the run's lock expires, so clients can stop showing it", async () => {
+    const { nb, c } = await openNotebook();
+    const execution = randomUUID();
+    await notify({ ...started(nb, execution), expires_at: "2026-11-13T12:00:27+00:00" });
+    await waitFor(() => cellOf(c.doc, CELL)?.get("running") != null, "running state");
+    expect(cellOf(c.doc, CELL)!.get("running")).toMatchObject({
+      executionId: execution,
+      expiresAt: "2026-11-13T12:00:27+00:00",
+    });
+  });
+
+  it("ignores a run_started with a malformed expiry", async () => {
+    const { nb, c } = await openNotebook();
+    await notify({ ...started(nb, randomUUID()), expires_at: "tomorrow-ish" });
+    await notify({ ...started(nb, randomUUID()), user_name: "Bob" });
+    await waitFor(
+      () => (cellOf(c.doc, CELL)?.get("running") as { by?: string })?.by === "Bob",
+      "later event",
+    );
+  });
+
   it("writes the running state and then the finished run into the document", async () => {
     const { nb, c } = await openNotebook();
     const execution = randomUUID();
@@ -102,6 +124,7 @@ describe("run events", () => {
       executionId: execution,
       by: "Alice",
       startedAt: "2026-11-13T12:00:00+00:00",
+      expiresAt: null, // the event didn't say
     });
 
     const run = randomUUID();
@@ -293,5 +316,81 @@ describe("listener", () => {
     expect(doomedCodes).toEqual([4404]);
     expect(b.provider.wsconnected).toBe(true);
     expect(s.sync.manager.rooms.has(doomed.nb)).toBe(false);
+  });
+});
+
+describe("reconciling runs whose end was missed", () => {
+  // A document stored while a run was in flight, then the run_finished was
+  // never delivered (listener reconnecting, or the API process died).
+  async function notebookStuckRunning(executionId: string): Promise<string> {
+    const doc = docWithSqlCell(CELL);
+    doc.transact(() =>
+      cellOf(doc, CELL)!.set("running", {
+        executionId,
+        by: "Alice",
+        startedAt: "2026-11-13T12:00:00+00:00",
+        expiresAt: null,
+      }),
+    );
+    return createNotebook(pool, Y.encodeStateAsUpdate(doc));
+  }
+
+  async function storeRun(nb: string, executionId: string): Promise<string> {
+    const id = randomUUID();
+    await pool.query(
+      `INSERT INTO cell_runs (id, notebook_id, cell_id, sql, status, result, execution_id)
+       VALUES ($1, $2, $3, 'select 1', 'ok', '{}', $4)`,
+      [id, nb, CELL, executionId],
+    );
+    return id;
+  }
+
+  async function open(nb: string): Promise<Client> {
+    const editor = await member(pool, nb, "editor");
+    const c = connectClient(s, nb, ticketFor(editor, nb));
+    clients.push(c);
+    await synced(c);
+    return c;
+  }
+
+  it("points the cell at the run its execution stored and clears running, on load", async () => {
+    const execution = randomUUID();
+    const nb = await notebookStuckRunning(execution);
+    const run = await storeRun(nb, execution);
+    const c = await open(nb);
+    await waitFor(() => cellOf(c.doc, CELL)?.get("running") === null, "running cleared");
+    expect(cellOf(c.doc, CELL)!.get("lastRunId")).toBe(run);
+  });
+
+  it("clears running without a result when the execution stored nothing", async () => {
+    const nb = await notebookStuckRunning(randomUUID());
+    const c = await open(nb);
+    await waitFor(() => cellOf(c.doc, CELL)?.get("running") === null, "running cleared");
+    expect(cellOf(c.doc, CELL)!.get("lastRunId")).toBeNull();
+  });
+
+  it("leaves a run that still holds its lock alone", async () => {
+    const execution = randomUUID();
+    const nb = await notebookStuckRunning(execution);
+    await pool.query(
+      `INSERT INTO cell_executions (notebook_id, cell_id, execution_id, started_at, expires_at)
+       VALUES ($1, $2, $3, now(), now() + interval '1 minute')`,
+      [nb, CELL, execution],
+    );
+    const c = await open(nb);
+    await sleep(300);
+    expect(cellOf(c.doc, CELL)!.get("running")).toMatchObject({ executionId: execution });
+  });
+
+  it("settles runs in loaded rooms after the listener reconnects", async () => {
+    const { nb, c } = await openNotebook();
+    const execution = randomUUID();
+    await notify(started(nb, execution));
+    await waitFor(() => cellOf(c.doc, CELL)?.get("running") != null, "running state");
+    // The run finishes while the listener is down: stored, but never announced.
+    const run = await storeRun(nb, execution);
+    await killListener();
+    await waitFor(() => cellOf(c.doc, CELL)?.get("lastRunId") === run, "reconciled run");
+    expect(cellOf(c.doc, CELL)!.get("running")).toBeNull();
   });
 });

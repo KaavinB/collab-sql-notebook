@@ -20,6 +20,7 @@ from notebook_api import events
 from notebook_api.auth import tokens
 from notebook_api.config import Settings
 from notebook_api.main import create_app
+from notebook_api.notebooks import sharing
 from notebook_api.notebooks.sharing import MAX_SHARE_LINKS_PER_NOTEBOOK
 from tests.fixtures import (
     TEST_AUTH_SECRET,
@@ -497,3 +498,19 @@ def test_the_sync_url_defaults_to_the_local_sync_server_and_drops_a_trailing_sla
     assert Settings(sync_public_url="wss://sync.example.com/").sync_public_url == (
         "wss://sync.example.com"
     )
+
+
+def test_a_full_notebook_refuses_new_members_but_not_existing_ones(
+    owner: TestClient, clean_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sharing, "MEMBERS_LIMIT", 2)  # the owner plus one
+    notebook_id = _notebook(owner)
+    link = _link(owner, notebook_id, "editor")
+    with _user(clean_db, "Vera") as vera, _user(clean_db, "Ed") as ed:
+        assert _accept(vera, link["token"]).status_code == 200
+        refused = _accept(ed, link["token"])
+        assert refused.status_code == 409
+        assert refused.json()["detail"]["message"] == "This notebook has reached its member limit."
+        assert ed.get(f"/notebooks/{notebook_id}").status_code == 404
+        # Someone already in can still open a link (it's not a new member).
+        assert _accept(vera, link["token"]).status_code == 200

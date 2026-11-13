@@ -64,6 +64,11 @@ export class RoomManager {
       if (this.rooms.get(gone.id) === gone) this.rooms.delete(gone.id);
     });
     this.rooms.set(notebookId, room);
+    // A loaded document may still show runs whose end was never reported.
+    room.ready.then(
+      () => void this.reconcileRuns(room),
+      () => {},
+    );
     return room;
   }
 
@@ -185,6 +190,7 @@ export class RoomManager {
             executionId: event.executionId,
             by: event.userName,
             startedAt: event.startedAt,
+            expiresAt: event.expiresAt,
           }),
         );
         break;
@@ -243,7 +249,40 @@ export class RoomManager {
    */
   async recheckAccess(): Promise<void> {
     log.info("access.recheck", { rooms: this.rooms.size });
-    await Promise.all([...this.rooms.values()].map((room) => this.recheckRoom(room)));
+    await Promise.all(
+      [...this.rooms.values()].map(async (room) => {
+        await this.recheckRoom(room);
+        await this.reconcileRuns(room);
+      }),
+    );
+  }
+
+  /**
+   * Settles cells the document shows as running whose execution is over,
+   * for when its run_finished was missed: the listener was reconnecting, or
+   * the API process running it died (its lock then expires). Each such cell
+   * gets the run its execution stored, if any, and stops showing as running.
+   * Runs when a room loads and after the listener reconnects.
+   */
+  async reconcileRuns(room: Room): Promise<void> {
+    if (room.status !== "ready") return;
+    const running = room.runningExecutions();
+    if (running.size === 0) return;
+    room.holds++;
+    try {
+      const { live, runs } = await this.store.executionOutcomes(room.id, [...running.values()]);
+      if (room.status !== "ready") return;
+      for (const [cellId, executionId] of running) {
+        if (live.has(executionId)) continue;
+        room.runFinished(cellId, executionId, runs.get(executionId) ?? null);
+        log.info("run.reconciled", { notebook: room.id, cell: cellId });
+      }
+    } catch (error) {
+      log.warn("run.reconcile_failed", { notebook: room.id, error: errorMessage(error) });
+    } finally {
+      room.holds--;
+      if (room.idle) this.scheduleUnload(room, 0);
+    }
   }
 
   private async recheckRoom(room: Room): Promise<void> {

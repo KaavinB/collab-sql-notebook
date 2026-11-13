@@ -244,19 +244,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
     async deleteNotebook(id: string): Promise<void> {
       await request(`/notebooks/${encodeURIComponent(id)}`, { method: "DELETE" });
     },
-    /** The saved Yjs state, or null if the notebook has never been saved. */
-    async loadSnapshot(id: string): Promise<Uint8Array | null> {
-      const response = await request(`/notebooks/${encodeURIComponent(id)}/snapshot`);
-      if (response.status === 204) return null;
-      return new Uint8Array(await readBody(() => response.arrayBuffer()));
-    },
-    async saveSnapshot(id: string, state: Uint8Array): Promise<void> {
-      await request(`/notebooks/${encodeURIComponent(id)}/snapshot`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: state as BodyInit,
-      });
-    },
     /**
      * Runs a cell. Aborting `signal` only stops waiting for the response: the
      * server keeps running the query (holding one of its workers) and stores

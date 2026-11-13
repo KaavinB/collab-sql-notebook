@@ -1,1 +1,1 @@
-"""Notebook CRUD, Yjs snapshot storage and shared cell runs."""
+"""Notebook CRUD, sharing, and shared cell runs."""

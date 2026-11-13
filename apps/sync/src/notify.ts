@@ -8,10 +8,10 @@
  * with backoff. Notifications sent while it was down are lost (Postgres
  * doesn't queue them for a listener that isn't connected). After a
  * reconnect, `onReconnect` runs so access can be re-checked against the
- * tables (the server does that for every open socket and loaded room). Run
- * events are not recovered here: a missed run_finished leaves the cell's
- * `running` state set and its new result unpointed (lastRunId unchanged)
- * until something reconciles it from the API's tables.
+ * tables (the server does that for every open socket and loaded room), and
+ * run state is reconciled: a cell still marked running whose execution no
+ * longer holds the API's lock gets the run that execution stored, if any,
+ * and stops showing as running (see RoomManager.reconcileRuns).
  *
  * Payloads come from the database, but they're validated like any other
  * input: a malformed one is logged and ignored, and an unknown `type` is
@@ -33,6 +33,8 @@ export type NotebookEvent =
       executionId: string;
       userName: string;
       startedAt: string;
+      /** When the execution's lock lapses; null if the API didn't say. */
+      expiresAt: string | null;
     }
   | {
       type: "run_finished";
@@ -60,6 +62,17 @@ function uuid(value: unknown, field: string): string {
   return value.toLowerCase();
 }
 
+function timestamp(value: unknown, field: string): string {
+  if (
+    typeof value !== "string" ||
+    value.length > MAX_TIMESTAMP_LENGTH ||
+    Number.isNaN(Date.parse(value))
+  ) {
+    throw new InvalidEvent(`bad ${field}`);
+  }
+  return value;
+}
+
 function matching(value: unknown, pattern: RegExp, field: string): string {
   if (typeof value !== "string" || !pattern.test(value)) throw new InvalidEvent(`bad ${field}`);
   return value;
@@ -73,17 +86,12 @@ function toEvent(raw: Record<string, unknown>): NotebookEvent | null {
   switch (raw.type) {
     case "run_started": {
       const userName = raw.user_name;
-      const startedAt = raw.started_at;
       if (typeof userName !== "string" || [...userName].length > MAX_NAME_LENGTH) {
         throw new InvalidEvent("bad user_name");
       }
-      if (
-        typeof startedAt !== "string" ||
-        startedAt.length > MAX_TIMESTAMP_LENGTH ||
-        Number.isNaN(Date.parse(startedAt))
-      ) {
-        throw new InvalidEvent("bad started_at");
-      }
+      const startedAt = timestamp(raw.started_at, "started_at");
+      const expiresAt =
+        raw.expires_at === undefined ? null : timestamp(raw.expires_at, "expires_at");
       return {
         type: "run_started",
         notebookId: uuid(raw.notebook_id, "notebook_id"),
@@ -91,6 +99,7 @@ function toEvent(raw: Record<string, unknown>): NotebookEvent | null {
         executionId: matching(raw.execution_id, EXECUTION_ID, "execution_id"),
         userName,
         startedAt,
+        expiresAt,
       };
     }
     case "run_finished":

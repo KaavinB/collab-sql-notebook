@@ -157,7 +157,9 @@ export function SqlCellBody({
         <p className="text-xs text-zinc-500" role="status">
           {state.ignoredSubmit
             ? "Already running. Run again when it finishes to use your latest edits."
-            : "Running…"}
+            : state.by
+              ? `Running… (started by ${state.by})`
+              : "Running…"}
         </p>
       )}
       {stale && state.status !== "running" && (

@@ -55,8 +55,10 @@ MAX_SHARE_LINKS_PER_NOTEBOOK = 20
 # of role doesn't matter.
 SYNC_TICKET_TTL_SECONDS = 60
 SYNC_TICKET_PURPOSE = "sync-ticket"
-# GET /members returns at most this many. Membership only grows through
-# share links an owner hands out, so a notebook has a handful of members.
+# At most this many members per notebook. Accepting a share link is refused
+# past it, so GET /members (which returns at most this many) never cuts the
+# list short. Two joins committing at the same moment can each pass the
+# check, so the real ceiling is this plus the number of simultaneous joins.
 MEMBERS_LIMIT = 500
 
 SharedRole = Literal["editor", "viewer"]
@@ -218,6 +220,25 @@ async def accept_share_link(
     )
     if link_role is None:
         raise _link_not_found()
+    already_member = await session.scalar(
+        select(NotebookMember.role).where(
+            NotebookMember.notebook_id == notebook_id, NotebookMember.user_id == user.id
+        )
+    )
+    if already_member is None:
+        members = await session.scalar(
+            select(func.count())
+            .select_from(NotebookMember)
+            .where(NotebookMember.notebook_id == notebook_id)
+        )
+        if (members or 0) >= MEMBERS_LIMIT:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "kind": "conflict",
+                    "message": "This notebook has reached its member limit.",
+                },
+            )
 
     role = await _join(session, notebook_id, user.id, cast(SharedRole, link_role))
     await session.commit()

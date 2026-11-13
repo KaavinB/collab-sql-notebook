@@ -10,112 +10,82 @@ import {
   type ChartSource,
   type SqlCellOption,
 } from "@/components/notebook/ChartCell";
-import { useRuns } from "@/components/notebook/useRuns";
+import { useOptionalSession } from "@/components/auth/SessionGate";
+import { Presence } from "@/components/notebook/Presence";
+import { useRuns, type RunState } from "@/components/notebook/useRuns";
 import { SharePanel } from "@/components/sharing/SharePanel";
-import { ApiError, createApiClient, type ApiClient, type Notebook } from "@/lib/api";
-import { attachAutosave, LOAD_ORIGIN, type Autosave } from "@/lib/notebook/autosave";
+import { ApiError, createApiClient, type ApiClient, type Notebook, type Role } from "@/lib/api";
+import { AwarenessContext } from "@/lib/notebook/awarenessContext";
 import { writeChartConfig, type ChartConfig } from "@/lib/notebook/chart";
 import {
   appendCell,
   chartMap,
   deleteCell,
+  isRunActive,
   moveCell,
   setLastRun,
   type CellType,
   type CellView,
 } from "@/lib/notebook/doc";
 import {
-  createSaveStateStore,
-  isPermanentSaveError,
-  saveLabel,
-  type SaveStateStore,
-} from "@/lib/notebook/saveStatus";
+  connectNotebook,
+  type NotebookSync,
+  type ProviderFactory,
+  type SyncState,
+} from "@/lib/notebook/sync";
 import { useCells } from "@/lib/notebook/useCells";
-import { trackPendingWork } from "@/lib/pendingWork";
-
-type Loaded = { doc: Y.Doc; notebook: Notebook };
 
 /**
- * Saves still finishing after their page unmounted, by notebook ID. Reopening
- * the notebook waits for them before loading, so it can't load an older
- * snapshot and then autosave it over the edits that were still in flight.
+ * A notebook page. The notebook's metadata (title, your role) comes from
+ * the API; its content is a Yjs document kept live by the sync server, which
+ * also stores it. There is no "save": every edit is sent as it happens.
  */
-const pendingFlushes = new Map<string, Promise<void>>();
-
 export function NotebookEditor({
   notebookId,
   api: injected,
+  createProvider,
 }: {
   notebookId: string;
   api?: ApiClient;
+  /** Replaces the WebSocket provider (tests). */
+  createProvider?: ProviderFactory;
 }) {
   const api = useMemo(() => injected ?? createApiClient(), [injected]);
-  const [loaded, setLoaded] = useState<Loaded | null>(null);
+  const [notebook, setNotebook] = useState<Notebook | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const saveState = useMemo(() => createSaveStateStore(), []);
+  const [sync, setSync] = useState<NotebookSync | null>(null);
 
-  // Load the notebook, apply its snapshot, and only then start autosaving,
-  // so an early save can never overwrite the stored document with an empty one.
   useEffect(() => {
     let cancelled = false;
-    const doc = new Y.Doc();
-    let autosave: Autosave | null = null;
-    (async () => {
-      try {
-        await pendingFlushes.get(notebookId);
-        const [notebook, snapshot] = await Promise.all([
-          api.getNotebook(notebookId),
-          api.loadSnapshot(notebookId),
-        ]);
-        if (cancelled) return;
-        if (snapshot) Y.applyUpdate(doc, snapshot, LOAD_ORIGIN);
-        autosave = attachAutosave(doc, {
-          save: (state) => api.saveSnapshot(notebookId, state),
-          onStatus: (status, error) =>
-            saveState.set(
-              status === "error"
-                ? { status, error, permanent: isPermanentSaveError(error) }
-                : { status },
-            ),
-          isPermanentError: isPermanentSaveError,
-        });
-        setLoaded({ doc, notebook });
-      } catch (error) {
-        if (!cancelled) {
-          setLoadError(error instanceof ApiError ? error.message : "Could not load the notebook.");
-        }
-      }
-    })();
+    api.getNotebook(notebookId).then(
+      (loaded) => !cancelled && setNotebook(loaded),
+      (error: unknown) =>
+        !cancelled &&
+        setLoadError(error instanceof ApiError ? error.message : "Could not load the notebook."),
+    );
     return () => {
       cancelled = true;
-      const pending = autosave;
-      if (!pending) {
-        doc.destroy();
-        return;
-      }
-      // Save what's pending before letting go of the document.
-      const flushed: Promise<void> = pending
-        .flush()
-        .catch(() => {})
-        .finally(() => {
-          pending.dispose();
-          doc.destroy();
-          if (pendingFlushes.get(notebookId) === flushed) pendingFlushes.delete(notebookId);
-        });
-      pendingFlushes.set(notebookId, flushed);
-      // Signing out waits for this save before ending the session.
-      trackPendingWork(flushed);
     };
-  }, [api, notebookId, saveState]);
+  }, [api, notebookId]);
 
-  // Warn before closing the tab with unsaved changes.
+  // One live connection per mounted page. Created in an effect (not during
+  // render) so React's development double-mount gets a fresh connection.
   useEffect(() => {
+    const connection = connectNotebook(api, notebookId, createProvider);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- publishing an external object
+    setSync(connection);
+    return () => connection.destroy();
+  }, [api, notebookId, createProvider]);
+
+  // Warn before closing the tab with edits the server hasn't received.
+  useEffect(() => {
+    if (!sync) return;
     const warn = (event: BeforeUnloadEvent) => {
-      if (saveState.get().status !== "saved") event.preventDefault();
+      if (sync.hasUnsyncedEdits()) event.preventDefault();
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [saveState]);
+  }, [sync]);
 
   if (loadError) {
     return (
@@ -129,38 +99,112 @@ export function NotebookEditor({
       </div>
     );
   }
-  if (!loaded) return <p className="text-zinc-500">Loading notebook…</p>;
-  return <LoadedNotebook api={api} loaded={loaded} saveState={saveState} />;
+  if (!notebook || !sync) return <p className="text-zinc-500">Loading notebook…</p>;
+  return <SyncedNotebook api={api} notebook={notebook} sync={sync} />;
 }
 
-/** The save status, re-rendering only itself when it changes. */
-function SaveStatusLabel({ store }: { store: SaveStateStore }) {
-  const state = useSyncExternalStore(store.subscribe, store.get, store.get);
-  const failed = state.status === "error";
+function useSyncState(sync: NotebookSync): SyncState {
+  return useSyncExternalStore(sync.subscribe, sync.get, sync.get);
+}
+
+/** Waits for the first sync, then shows the notebook with its live status. */
+function SyncedNotebook({
+  api,
+  notebook,
+  sync,
+}: {
+  api: ApiClient;
+  notebook: Notebook;
+  sync: NotebookSync;
+}) {
+  const state = useSyncState(sync);
+  const me = useOptionalSession()?.user;
+  const awareness = sync.awareness();
+  // Our own entry in the presence list. Yjs never lets a peer's copy replace
+  // a client's own awareness state, so this tab sets its own name; the sync
+  // server stamps the real one (from the ticket) on what everyone else sees.
+  useEffect(() => {
+    if (awareness && me) awareness.setLocalStateField("user", { id: me.id, name: me.name });
+  }, [awareness, me]);
+  // Loaded once the first sync completed; afterwards the notebook stays on
+  // screen through disconnects (edits continue offline) and stops.
+  const [loaded, setLoaded] = useState(false);
+  if (!loaded && state.status === "live") setLoaded(true);
+
+  if (!loaded) {
+    if (state.status === "stopped") {
+      return (
+        <div className="space-y-2">
+          <p role="alert" className="text-red-600">
+            {state.message}
+          </p>
+          <Link href="/" className="text-sm underline">
+            Back to notebooks
+          </Link>
+        </div>
+      );
+    }
+    return <p className="text-zinc-500">Connecting…</p>;
+  }
+  // The live role wins: it changes when an owner changes yours. A stopped
+  // connection can't send edits anymore, so the page turns view-only.
+  const role: Role = state.role ?? notebook.role;
+  const readOnly = role === "viewer" || state.status === "stopped";
+  return (
+    <AwarenessContext.Provider value={awareness}>
+      <LoadedNotebook
+        api={api}
+        doc={sync.doc}
+        notebook={{ ...notebook, role }}
+        readOnly={readOnly}
+        status={<SyncStatusLabel state={state} />}
+        presence={<Presence awareness={awareness} />}
+      />
+    </AwarenessContext.Provider>
+  );
+}
+
+function SyncStatusLabel({ state }: { state: SyncState }) {
+  if (state.status === "stopped") {
+    return (
+      <span role="alert" className="ml-auto text-xs text-red-600" data-testid="sync-status">
+        {state.message}
+      </span>
+    );
+  }
+  const label =
+    state.status === "live"
+      ? "Live"
+      : state.status === "offline"
+        ? "Offline. Your edits will sync when the connection is back."
+        : "Connecting…";
   return (
     <span
-      className={`ml-auto text-xs ${failed ? "text-red-600" : "text-zinc-500"}`}
-      role={failed && state.permanent ? "alert" : "status"}
-      data-testid="save-status"
+      role="status"
+      className={`ml-auto text-xs ${state.status === "offline" ? "text-amber-700" : "text-zinc-500"}`}
+      data-testid="sync-status"
     >
-      {saveLabel(state)}
+      {label}
     </span>
   );
 }
 
 function LoadedNotebook({
   api,
-  loaded,
-  saveState,
+  doc,
+  notebook,
+  readOnly,
+  status,
+  presence,
 }: {
   api: ApiClient;
-  loaded: Loaded;
-  saveState: SaveStateStore;
+  doc: Y.Doc;
+  notebook: Notebook;
+  /** Viewers read; the API refuses their writes and the sync server drops their edits. */
+  readOnly: boolean;
+  status: React.ReactNode;
+  presence: React.ReactNode;
 }) {
-  const { doc, notebook } = loaded;
-  // Viewers read; the API refuses their writes anyway, and the sync server
-  // drops their document updates. The UI just doesn't offer them.
-  const readOnly = notebook.role === "viewer";
   const cells = useCells(doc);
   const { runs, loadFailures, cellStates, ensureRun, runCell } = useRuns(api, notebook.id);
   // SQL cells a chart can draw from, labelled by their position. (Not by their
@@ -187,8 +231,9 @@ function LoadedNotebook({
             View only
           </span>
         )}
-        <SaveStatusLabel store={saveState} />
+        {status}
       </div>
+      {presence}
       {readOnly ? (
         <h1 className="text-2xl font-semibold tracking-tight">{notebook.title}</h1>
       ) : (
@@ -251,7 +296,14 @@ function Cell({
   sqlCells: SqlCellOption[];
   cells: CellView[];
 }) {
-  const state = cellStates.get(cell.id) ?? { status: "idle" as const };
+  const ownState = cellStates.get(cell.id) ?? { status: "idle" as const };
+  const sharedRunActive = useRunActive(cell.running);
+  // Our own request shows first; otherwise a run anyone started (from the
+  // shared document) shows as running for everyone.
+  const state: RunState =
+    ownState.status === "idle" && sharedRunActive && cell.running
+      ? { status: "running", by: cell.running.by }
+      : ownState;
   const run = useCallback(async () => {
     const sql = cell.source?.toString().trim();
     if (!sql) return;
@@ -305,6 +357,24 @@ function Cell({
       )}
     </CellFrame>
   );
+}
+
+/**
+ * Whether a cell's shared run is still in progress, re-rendering when its
+ * lock expires. (If the API process running it died, nobody reports it
+ * finished; past its lock's expiry it can't be running anymore.)
+ */
+function useRunActive(running: CellView["running"]): boolean {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running?.expiresAt) return;
+    const remaining = Date.parse(running.expiresAt) - Date.now();
+    if (Number.isNaN(remaining)) return;
+    // Also fires at once for an already-expired run, refreshing `now`.
+    const timer = setTimeout(() => setNow(Date.now()), Math.max(0, remaining) + 50);
+    return () => clearTimeout(timer);
+  }, [running]);
+  return isRunActive(running, now);
 }
 
 /** A chart cell: its config form, drawn from the source SQL cell's latest result. */

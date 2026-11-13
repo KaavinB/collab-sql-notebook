@@ -34,7 +34,10 @@ router = APIRouter(prefix="/auth")
 
 Session = Annotated[AsyncSession, Depends(get_session)]
 
-_FLOW_COOKIE = "oauth_flow"
+# App-specific: cookies aren't separated by port, so another app on localhost
+# could otherwise share the name. (No __Host- prefix: that needs Path=/, and
+# this cookie is scoped to /auth.)
+_FLOW_COOKIE = "notebook_oauth_flow"
 _FLOW_PURPOSE = "oauth-flow"
 # Long enough to approve the app at the provider, short enough that a
 # leaked flow cookie is soon useless.

@@ -10,6 +10,10 @@
  *     cell.get("source")    Y.Text, for sql and markdown cells
  *     cell.get("lastRunId") string | null, for sql cells (results live in
  *                           Postgres; the document only points at them)
+ *     cell.get("running")   { executionId, by, startedAt, expiresAt } | null,
+ *                           for sql cells: a run in progress. Written only by
+ *                           the sync server, when the API reports a run
+ *                           starting and finishing, so everyone sees it.
  *     cell.get("chart")     Y.Map, for chart cells: the ChartConfig,
  *                           one entry per field (see chart.ts)
  *
@@ -32,6 +36,16 @@ import { newChartMap, readChartConfig, type ChartConfig } from "@/lib/notebook/c
 export const CELL_TYPES = ["sql", "markdown", "chart"] as const;
 export type CellType = (typeof CELL_TYPES)[number];
 
+/** A run in progress on a sql cell, as the sync server recorded it. */
+export interface RunningState {
+  executionId: string;
+  /** Display name of whoever pressed Run. */
+  by: string;
+  /** ISO-8601 times. After `expiresAt` the run's lock has expired, so it isn't running anymore. */
+  startedAt: string;
+  expiresAt: string | null;
+}
+
 export interface CellView {
   id: string;
   type: CellType;
@@ -41,6 +55,8 @@ export interface CellView {
   lastRunId: string | null;
   /** The chart's config, for chart cells; null otherwise. */
   chart: ChartConfig | null;
+  /** A run in progress, for sql cells; null otherwise. */
+  running: RunningState | null;
 }
 
 const CELLS_KEY = "cells";
@@ -102,7 +118,33 @@ function readCell(id: string, cell: unknown): CellView | null {
     source: source instanceof Y.Text ? source : null,
     lastRunId: typeof lastRunId === "string" ? lastRunId : null,
     chart: type === "chart" ? readChartConfig(cell.get("chart")) : null,
+    running: type === "sql" ? readRunning(cell.get("running")) : null,
   };
+}
+
+const MAX_RUNNING_TEXT = 200;
+const shortString = (value: unknown): value is string =>
+  typeof value === "string" && value.length <= MAX_RUNNING_TEXT;
+
+/** Reads a cell's `running` entry, or null if it's absent or malformed. */
+export function readRunning(value: unknown): RunningState | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { executionId, by, startedAt, expiresAt } = value as Record<string, unknown>;
+  if (!shortString(executionId) || !shortString(by) || !shortString(startedAt)) return null;
+  return {
+    executionId,
+    by,
+    startedAt,
+    expiresAt: shortString(expiresAt) ? expiresAt : null,
+  };
+}
+
+/** Whether a run is still in progress at `now` (ms since epoch). */
+export function isRunActive(running: RunningState | null, now: number): boolean {
+  if (!running) return false;
+  if (running.expiresAt === null) return true;
+  const expires = Date.parse(running.expiresAt);
+  return Number.isNaN(expires) || now < expires;
 }
 
 /** All valid cells, in display order. */

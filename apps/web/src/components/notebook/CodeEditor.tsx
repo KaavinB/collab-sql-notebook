@@ -13,9 +13,11 @@ import {
   lineNumbers,
   placeholder,
 } from "@codemirror/view";
-import { useEffect, useRef } from "react";
+import { useContext, useEffect, useRef } from "react";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import * as Y from "yjs";
+
+import { AwarenessContext } from "@/lib/notebook/awarenessContext";
 
 interface CodeEditorProps {
   text: Y.Text;
@@ -41,7 +43,13 @@ export function readOnlyExtensions(): Extension[] {
 /**
  * A CodeMirror 6 editor bound to a Y.Text (the cell's source in the shared
  * document). yCollab keeps the two in sync both ways: local typing becomes Yjs
- * updates, and remote updates (Phase 2) appear in the editor.
+ * updates, and collaborators' updates appear in the editor.
+ *
+ * With the notebook's awareness (from AwarenessContext), yCollab also
+ * publishes this user's cursor and selection while the editor has focus,
+ * and draws everyone else's, in their color with their name. A cursor is
+ * stored relative to the Y.Text it's in, so each cell's editor only draws
+ * the cursors that are inside that cell.
  *
  * Undo/redo comes from Yjs's UndoManager, not CodeMirror's history: it only
  * undoes this user's own edits, never someone else's.
@@ -54,6 +62,7 @@ export function CodeEditor({
   readOnly = false,
 }: CodeEditorProps) {
   const parent = useRef<HTMLDivElement>(null);
+  const awareness = useContext(AwarenessContext);
   // The latest onSubmit, without rebuilding the editor when it changes.
   const submit = useRef(onSubmit);
   useEffect(() => {
@@ -86,7 +95,7 @@ export function CodeEditor({
         ...defaultKeymap,
       ]),
       language === "sql" ? sql() : markdown(),
-      yCollab(text, null, { undoManager }),
+      yCollab(text, awareness, { undoManager }),
     ];
     if (placeholderText && !readOnly) extensions.push(placeholder(placeholderText));
     if (readOnly) extensions.push(...readOnlyExtensions());
@@ -98,7 +107,7 @@ export function CodeEditor({
       view.destroy();
       undoManager.destroy();
     };
-  }, [text, language, placeholderText, readOnly]);
+  }, [text, language, placeholderText, readOnly, awareness]);
 
   return (
     <div

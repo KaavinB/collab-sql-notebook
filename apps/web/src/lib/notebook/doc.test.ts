@@ -6,9 +6,11 @@ import {
   cellsMap,
   deleteCell,
   insertCell,
+  isRunActive,
   isValidOrderKey,
   moveCell,
   orderedCells,
+  readRunning,
   setLastRun,
 } from "@/lib/notebook/doc";
 
@@ -282,5 +284,45 @@ describe("isValidOrderKey", () => {
     for (const bad of ["", "a", "a00", "zz", "A", "a0!", "a0".padEnd(65, "1")]) {
       expect(isValidOrderKey(bad)).toBe(false);
     }
+  });
+});
+
+describe("running state", () => {
+  const valid = {
+    executionId: "e1",
+    by: "Ada",
+    startedAt: "2026-11-13T10:00:00Z",
+    expiresAt: "2026-11-13T10:00:27Z",
+  };
+
+  it("reads a well-formed running entry from a sql cell", () => {
+    const doc = new Y.Doc();
+    const id = appendCell(doc, "sql");
+    cellsMap(doc).get(id)!.set("running", valid);
+    expect(orderedCells(doc)[0].running).toEqual(valid);
+  });
+
+  it.each([
+    ["not an object", "running"],
+    ["an array", []],
+    ["missing who", { ...valid, by: undefined }],
+    ["a huge name", { ...valid, by: "x".repeat(201) }],
+  ])("ignores a malformed entry (%s)", (_label, value) => {
+    expect(readRunning(value)).toBeNull();
+  });
+
+  it("treats an expired run as no longer running", () => {
+    const running = readRunning(valid);
+    expect(isRunActive(running, Date.parse("2026-11-13T10:00:26Z"))).toBe(true);
+    expect(isRunActive(running, Date.parse("2026-11-13T10:00:27Z"))).toBe(false);
+    expect(isRunActive(readRunning({ ...valid, expiresAt: undefined }), Date.now())).toBe(true);
+    expect(isRunActive(null, Date.now())).toBe(false);
+  });
+
+  it("only sql cells carry it", () => {
+    const doc = new Y.Doc();
+    const id = appendCell(doc, "markdown");
+    cellsMap(doc).get(id)!.set("running", valid);
+    expect(orderedCells(doc)[0].running).toBeNull();
   });
 });

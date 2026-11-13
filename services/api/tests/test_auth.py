@@ -197,6 +197,7 @@ def test_github_sign_in_creates_a_session(oauth_client: TestClient, provider: Fa
     assert response.headers["location"] == f"{WEB_ORIGIN}/notebooks/abc"
     cookie = response.headers["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=lax" in cookie
+    assert "notebook_oauth_flow=" in cookie  # the flow cookie is cleared
     me = oauth_client.get("/auth/me")
     assert me.status_code == 200
     assert me.json()["name"] == "Ada Lovelace"
@@ -335,8 +336,6 @@ def test_every_notebook_route_needs_a_session(client: TestClient) -> None:
         ("GET", f"/notebooks/{some_id}"),
         ("PATCH", f"/notebooks/{some_id}"),
         ("DELETE", f"/notebooks/{some_id}"),
-        ("GET", f"/notebooks/{some_id}/snapshot"),
-        ("PUT", f"/notebooks/{some_id}/snapshot"),
         ("POST", f"/notebooks/{some_id}/cells/c1/runs"),
         ("GET", f"/notebooks/{some_id}/runs/{some_id}"),
         ("POST", f"/notebooks/{some_id}/share-links"),
@@ -435,8 +434,6 @@ def test_notebooks_are_private_to_their_members(client: TestClient, clean_db: st
             ("GET", url, {}),
             ("PATCH", url, {"json": {"title": "mine"}}),
             ("DELETE", url, {}),
-            ("GET", f"{url}/snapshot", {}),
-            ("PUT", f"{url}/snapshot", {"content": b"x"}),
             ("POST", f"{url}/cells/c1/runs", {"json": {"sql": "select 1"}}),
             ("GET", f"{url}/runs/{run.json()['id']}", {}),
         ]
@@ -459,10 +456,8 @@ def test_roles_limit_what_members_can_do(client: TestClient, clean_db: str, quer
         url = f"/notebooks/{notebook_id}"
 
         assert viewer.get(url).json()["role"] == "viewer"
-        assert viewer.get(f"{url}/snapshot").status_code == 204
         for refused in [
             viewer.patch(url, json={"title": "x"}),
-            viewer.put(f"{url}/snapshot", content=b"x"),
             viewer.post(f"{url}/cells/c1/runs", json={"sql": "select 1"}),
             viewer.delete(url),
             editor.delete(url),
@@ -471,7 +466,6 @@ def test_roles_limit_what_members_can_do(client: TestClient, clean_db: str, quer
             assert refused.json()["detail"]["kind"] == "forbidden"
 
         assert editor.patch(url, json={"title": "Renamed"}).status_code == 200
-        assert editor.put(f"{url}/snapshot", content=b"x").status_code == 204
         ran = editor.post(f"{url}/cells/c1/runs", json={"sql": "select 1 as x"})
         assert ran.status_code == 201
         seen = viewer.get(f"{url}/runs/{ran.json()['id']}")

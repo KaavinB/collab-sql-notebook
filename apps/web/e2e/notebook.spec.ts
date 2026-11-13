@@ -1,40 +1,6 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
-// Set by playwright.config.ts, which starts the API on its own port.
-const API = process.env.E2E_API_URL!;
-const WEB = process.env.E2E_WEB_URL!;
-
-/**
- * API calls made with the page's own request context, which shares the
- * browser's cookies: signing in here signs the page in too. State-changing
- * calls carry the web app's Origin, as the browser's would.
- */
-const api = {
-  async signIn(page: Page, name = "E2E User") {
-    const response = await page.request.post(`${API}/auth/dev-login`, {
-      data: { name },
-      headers: { Origin: WEB },
-    });
-    expect(response.ok()).toBe(true);
-  },
-  async createNotebook(page: Page, title: string): Promise<string> {
-    const response = await page.request.post(`${API}/notebooks`, {
-      data: { title },
-      headers: { Origin: WEB },
-    });
-    expect(response.status()).toBe(201);
-    return (await response.json()).id as string;
-  },
-  async deleteNotebook(page: Page, id: string) {
-    await page.request.delete(`${API}/notebooks/${id}`, { headers: { Origin: WEB } });
-  },
-};
-
-async function typeInLastEditor(page: Page, text: string) {
-  const editor = page.locator(".cm-content").last();
-  await editor.click();
-  await page.keyboard.type(text);
-}
+import { API, api, typeInLastEditor } from "./helpers";
 
 test("sign in, create a notebook, run SQL, write markdown, and find it all after a reload", async ({
   page,
@@ -84,7 +50,7 @@ test("sign in, create a notebook, run SQL, write markdown, and find it all after
     await markdownCell.getByRole("button", { name: "Move cell up" }).click();
     await expect(page.locator("section").first()).toHaveAttribute("aria-label", /^markdown cell 1/);
 
-    await expect(page.getByTestId("save-status")).toHaveText("Saved", { timeout: 10_000 });
+    await expect(page.getByTestId("sync-status")).toHaveText("Live");
 
     // Everything survives a reload: text, order, and the stored results.
     await page.reload();
@@ -103,7 +69,7 @@ test("sign in, create a notebook, run SQL, write markdown, and find it all after
     await lastSql.getByRole("button", { name: "Delete cell" }).click();
     await lastSql.getByRole("button", { name: "Confirm delete cell" }).click();
     await expect(page.locator("section")).toHaveCount(2);
-    await expect(page.getByTestId("save-status")).toHaveText("Saved", { timeout: 10_000 });
+    await expect(page.getByTestId("sync-status")).toHaveText("Live");
     await page.reload();
     await expect(page.locator("section")).toHaveCount(2);
 
@@ -152,7 +118,7 @@ test("chart a SQL cell's result, and the chart survives a reload", async ({ page
     const bars = page.getByTestId("chart").locator(".mark-rect path");
     await expect(bars).toHaveCount(rows);
 
-    await expect(page.getByTestId("save-status")).toHaveText("Saved", { timeout: 10_000 });
+    await expect(page.getByTestId("sync-status")).toHaveText("Live");
     await page.reload();
     await expect(page.getByLabel("Chart x")).toHaveValue("payment_type");
     await expect(page.getByTestId("chart").locator(".mark-rect path")).toHaveCount(rows);

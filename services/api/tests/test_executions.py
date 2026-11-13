@@ -174,7 +174,8 @@ def test_the_lock_lifetime_covers_the_longest_healthy_execution(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, clean_db: str
 ) -> None:
     # queue timeout + query timeout + the runner's 2 s kill grace + 10 s margin.
-    assert lock_ttl_seconds(Settings()) == 5.0 + 10.0 + 2.0 + 10.0
+    defaults = Settings(query_queue_timeout_seconds=5.0, query_timeout_seconds=10.0)
+    assert lock_ttl_seconds(defaults) == 5.0 + 10.0 + 2.0 + 10.0
     gate = Gate(client, monkeypatch)
     notebook_id = _notebook(client)
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -339,12 +340,17 @@ def test_run_notifications_are_exact_ordered_and_sent_on_commit(
         (started,) = listener.take(1)
         # Delivered means committed: the lock row is visible to anyone.
         with sql_connection(clean_db) as conn:
-            row = conn.execute("SELECT execution_id, started_at FROM cell_executions").fetchone()
+            row = conn.execute(
+                "SELECT execution_id, started_at, expires_at FROM cell_executions"
+            ).fetchone()
         assert row is not None
-        execution_id, started_at = row
+        execution_id, started_at, expires_at = row
         assert started == compact(
-            events.run_started(uuid.UUID(notebook_id), "c1", execution_id, "Ada", started_at)
+            events.run_started(
+                uuid.UUID(notebook_id), "c1", execution_id, "Ada", started_at, expires_at
+            )
         )
+        assert '"expires_at":"' + expires_at.isoformat() + '"' in started
         assert '"started_at":"' + started_at.isoformat() + '"' in started
         assert listener.nothing_more()  # nothing finishes while the query runs
         gate.release.set()
@@ -361,7 +367,7 @@ def test_payloads_are_compact_and_bounded() -> None:
     # The largest a real message gets: a 64-character cell ID and a
     # 200-character name of characters that JSON escapes as \uXXXX.
     now = datetime.now(UTC)
-    event = events.run_started(uuid.uuid4(), "c" * 64, uuid.uuid4(), "é" * 200, now)
+    event = events.run_started(uuid.uuid4(), "c" * 64, uuid.uuid4(), "é" * 200, now, now)
     payload = events.encode(event)
     assert " " not in payload
     assert payload.isascii()

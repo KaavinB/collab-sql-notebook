@@ -89,6 +89,8 @@ export interface RunningState {
   executionId: string;
   by: string;
   startedAt: string;
+  /** When the execution's lock lapses; clients stop showing the run after it. */
+  expiresAt: string | null;
 }
 
 export class Room {
@@ -323,6 +325,20 @@ export class Room {
     this.doc.transact(() => {
       this.sqlCell(cellId)?.set("running", running);
     }, SERVER_ORIGIN);
+  }
+
+  /** Executions the document shows as running, by cell ID. */
+  runningExecutions(): Map<string, string> {
+    const running = new Map<string, string>();
+    const cells = this.doc.getMap<unknown>("cells");
+    cells.forEach((cell, cellId) => {
+      if (!(cell instanceof Y.Map) || cell.get("type") !== "sql") return;
+      const state = cell.get("running") as { executionId?: unknown } | null | undefined;
+      if (state && typeof state === "object" && typeof state.executionId === "string") {
+        running.set(cellId, state.executionId);
+      }
+    });
+    return running;
   }
 
   runFinished(cellId: string, executionId: string, runId: string | null): void {

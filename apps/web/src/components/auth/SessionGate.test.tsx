@@ -2,11 +2,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { useEffect } from "react";
-
 import { SessionGate, useSession } from "@/components/auth/SessionGate";
 import { ApiError, type ApiClient } from "@/lib/api";
-import { trackPendingWork } from "@/lib/pendingWork";
 import { deferred, fakeApi, USER } from "@/test/fakeApi";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/notebooks/abc" }));
@@ -123,25 +120,20 @@ describe("SessionGate", () => {
     expect(await screen.findByLabelText("Dev user name")).toBeTruthy();
   });
 
-  it("lets a page's final save finish before ending the session", async () => {
-    const finalSave = deferred<void>();
-    function Page() {
-      // Like NotebookEditor: unmounting starts a final save.
-      useEffect(() => () => trackPendingWork(finalSave.promise), []);
-      return <p>Notebook</p>;
-    }
-    const api = fakeApi();
+  it("stays signed in, with a message, when signing out fails", async () => {
+    const logout = vi
+      .fn<ApiClient["logout"]>()
+      .mockRejectedValueOnce(new ApiError(0, "network", "Could not reach the server."))
+      .mockResolvedValueOnce(undefined);
     render(
-      <SessionGate api={api}>
-        <Page />
+      <SessionGate api={fakeApi({ logout })}>
+        <Who />
       </SessionGate>,
     );
     fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
-    expect(await screen.findByText("Signing out…")).toBeTruthy();
-    await act(async () => {});
-    expect(api.logout).not.toHaveBeenCalled(); // the save still has a session
-    await act(async () => finalSave.resolve());
-    await waitFor(() => expect(api.logout).toHaveBeenCalledTimes(1));
+    expect((await screen.findByRole("alert")).textContent).toBe("Could not reach the server.");
+    expect(screen.getByText("Hello Ada")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" })); // retry works
     expect(await screen.findByLabelText("Dev user name")).toBeTruthy();
   });
 

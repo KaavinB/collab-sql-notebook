@@ -44,7 +44,7 @@ async def _upload(
     async def send(message: Message) -> None:
         responses.append(message)
 
-    middleware = BodyLimitMiddleware(app, max_bytes=10, snapshot_max_bytes=20)
+    middleware = BodyLimitMiddleware(app, max_bytes=10)
     await middleware(
         {"type": "http", "method": method, "path": path, "headers": headers or []}, receive, send
     )
@@ -78,19 +78,6 @@ async def test_replays_an_exact_limit_body_once() -> None:
     assert responses[0]["status"] == 204
     assert delivered == [b"1234567890"]
     assert reads == 2
-
-
-async def test_snapshot_has_its_own_streaming_limit() -> None:
-    path = "/notebooks/00000000-0000-4000-8000-000000000000/snapshot"
-    responses, delivered, _ = await _upload([b"x" * 20], path=path, method="PUT")
-    assert responses[0]["status"] == 204
-    assert delivered == [b"x" * 20]
-    responses, delivered, _ = await _upload([b"x" * 20, b"x"], path=path, method="PUT")
-    assert responses[0]["status"] == 413
-    assert delivered == []
-    # Only PUT of a snapshot gets the larger cap.
-    responses, _, _ = await _upload([b"x" * 11], path=path)
-    assert responses[0]["status"] == 413
 
 
 async def test_a_disconnected_upload_does_not_run_the_app() -> None:

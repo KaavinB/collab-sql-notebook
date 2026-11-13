@@ -42,7 +42,7 @@ from notebook_api.config import Settings
 from notebook_api.db.models import CellExecution, CellRun, Notebook
 from notebook_api.notebooks.access import lock_notebook
 from notebook_api.query.engine import QueryResult
-from notebook_api.query.runner import _KILL_GRACE_SECONDS, QueryFailedError
+from notebook_api.query.runner import KILL_GRACE_SECONDS, QueryFailedError
 from notebook_api.query.validate import QueryRejectedError
 
 # Older runs of a cell are pruned. A few are kept, not just the latest, so a
@@ -79,7 +79,7 @@ def lock_ttl_seconds(settings: Settings) -> float:
     return (
         settings.query_queue_timeout_seconds
         + settings.query_timeout_seconds
-        + _KILL_GRACE_SECONDS
+        + KILL_GRACE_SECONDS
         + LOCK_MARGIN_SECONDS
     )
 
@@ -239,9 +239,9 @@ class Executions:
                     "expires_at": insert.excluded.expires_at,
                 },
                 where=CellExecution.expires_at <= func.now(),
-            ).returning(CellExecution.started_at)
-            started_at = (await session.execute(claim)).scalar_one_or_none()
-            if started_at is None:
+            ).returning(CellExecution.started_at, CellExecution.expires_at)
+            claimed = (await session.execute(claim)).one_or_none()
+            if claimed is None:
                 holder = await session.scalar(
                     select(CellExecution.execution_id).where(
                         CellExecution.notebook_id == notebook_id, CellExecution.cell_id == cell_id
@@ -250,7 +250,14 @@ class Executions:
                 return _Held(holder)
             await events.notify(
                 session,
-                events.run_started(notebook_id, cell_id, execution_id, user_name, started_at),
+                events.run_started(
+                    notebook_id,
+                    cell_id,
+                    execution_id,
+                    user_name,
+                    claimed.started_at,
+                    claimed.expires_at,
+                ),
             )
             await session.commit()
             return True
