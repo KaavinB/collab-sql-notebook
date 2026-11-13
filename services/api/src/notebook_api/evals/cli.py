@@ -20,6 +20,7 @@ are rebuilt from everything recorded.
 import argparse
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -72,8 +73,8 @@ from notebook_api.evals.taxi import (
     TaxiAIWiring,
     TaxiQuestion,
     TaxiQuestionsError,
+    TaxiSetupError,
     TaxiTarget,
-    TaxiWiringUnavailableError,
     check_gold_sql,
     default_taxi_wiring,
     load_taxi_questions,
@@ -130,6 +131,8 @@ _FINGERPRINT = (
     "row_cap",
     "bird_archive_sha256",
     "taxi_questions_sha256",
+    "taxi_schema_sha256",
+    "taxi_query_limits",
     "ids",
     "sdk_version",
     "git_commit",
@@ -144,7 +147,7 @@ class Dependencies:
 
     generate: GenerateFn = field(default=pipeline.generate_sql)
     client_factory: ClientFactory = field(default=anthropic_client_factory)
-    taxi_wiring: Callable[[], TaxiAIWiring] = field(default=default_taxi_wiring)
+    taxi_wiring: Callable[[Path], TaxiAIWiring] = field(default=default_taxi_wiring)
     fetch: Fetcher = field(default=httpx2_fetch)
     archive: Archive = field(default=DEV_ARCHIVE)
     out: Callable[[str], None] = field(default=print)
@@ -169,7 +172,7 @@ def main(argv: Sequence[str] | None = None, deps: Dependencies | None = None) ->
         UnsafeArchiveError,
         BirdDataError,
         TaxiQuestionsError,
-        TaxiWiringUnavailableError,
+        TaxiSetupError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -387,10 +390,13 @@ async def _run(args: argparse.Namespace, data_dir: Path, deps: Dependencies) -> 
     source = _load_ids_from(args.ids_from) if args.ids_from is not None else None
     suites = list(SUITES) if args.suite == "all" else [args.suite]
     prepared: dict[str, _Suite] = {}
-    closers: list[Callable[[], None]] = []
+    # Cleanup for whatever the suites started; some are async (worker pools).
+    closers: list[Callable[[], object]] = []
     config: dict[str, Any] = {
         "bird_archive_sha256": None,
         "taxi_questions_sha256": None,
+        "taxi_schema_sha256": None,
+        "taxi_query_limits": None,
         "ids": {},
         "ids_from": str(args.ids_from.resolve()) if args.ids_from is not None else None,
     }
@@ -399,6 +405,7 @@ async def _run(args: argparse.Namespace, data_dir: Path, deps: Dependencies) -> 
             prepared["bird"] = _prepare_bird(args, data_dir, deps, config, source)
         if "taxi" in suites:
             prepared["taxi"] = _prepare_taxi(args, deps, config, closers, source)
+            await _read_taxi_schema(prepared["taxi"], config)
         # Every check that could stop the run happens before the first model call.
         factory = dry_run_client_factory if args.dry_run else deps.client_factory
         clients = {model: factory(model, args.effort) for model in args.models}
@@ -427,8 +434,14 @@ async def _run(args: argparse.Namespace, data_dir: Path, deps: Dependencies) -> 
             on_gold=lambda i, n, q, o: deps.out(_gold_line(i, n, q, o)),
         )
     finally:
+        # Every closer runs even if one fails: a worker pool must always stop.
         for close in closers:
-            close()
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as error:
+                deps.out(f"warning: cleanup failed: {type(error).__name__}: {error}")
 
     summary = build_summary(run, prepared, load_records(results_path))
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -503,7 +516,7 @@ def _prepare_taxi(
     args: argparse.Namespace,
     deps: Dependencies,
     config: dict[str, Any],
-    closers: list[Callable[[], None]],
+    closers: list[Callable[[], object]],
     source: dict[str, Any] | None,
 ) -> _Suite:
     path: Path = args.taxi_questions
@@ -520,7 +533,11 @@ def _prepare_taxi(
     executor = _taxi_executor(args.duckdb_path, args.query_timeout, args.row_cap)
     closers.append(executor.close)
     check_gold_sql(every, executor)
-    wiring = deps.taxi_wiring()
+    wiring = deps.taxi_wiring(args.duckdb_path)
+    aclose = getattr(wiring, "aclose", None)
+    if aclose is not None:
+        closers.append(aclose)
+
     if source is not None:
         selection = f"The exact {len(real)} question IDs from {args.ids_from}"
     else:
@@ -540,6 +557,18 @@ def _prepare_taxi(
         target=TaxiTarget(executor, wiring),
         selection=selection + ".",
     )
+
+
+async def _read_taxi_schema(suite: _Suite, config: dict[str, Any]) -> None:
+    """Read the taxi schema now, before any model call (BIRD questions may run
+    in the same run): a pool that can't start or a schema missing sample values
+    stops the run here, having spent nothing. Its hash and the query limits go
+    into run.json and the resume fingerprint."""
+    if not isinstance(suite.target, TaxiTarget):
+        return
+    schema = await suite.target.schema("taxi")
+    config["taxi_schema_sha256"] = hashlib.sha256(schema.text.encode()).hexdigest()
+    config["taxi_query_limits"] = suite.target.query_limits
 
 
 def _new_run_id(dry_run: bool) -> str:

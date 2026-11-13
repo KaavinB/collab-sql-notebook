@@ -1,5 +1,6 @@
 """Tiny stand-ins for BIRD and the model, so eval tests need no network and no API."""
 
+import asyncio
 import hashlib
 import io
 import json
@@ -170,6 +171,8 @@ class ScriptedGenerate:
     answers: dict[str, list[str]]
     raise_on: set[str] = field(default_factory=set)
     raise_after_refusal: set[str] = field(default_factory=set)
+    # Questions whose call after a refusal hits a service failure.
+    unavailable_after_refusal: set[str] = field(default_factory=set)
     calls: list[str] = field(default_factory=list)
     output_caps: list[int | None] = field(default_factory=list)
 
@@ -196,6 +199,8 @@ class ScriptedGenerate:
             if reply.stop_reason in ("refusal", "max_tokens"):
                 if reply.stop_reason == "refusal" and question in self.raise_after_refusal:
                     raise RuntimeError("pipeline bug after a refusal")
+                if reply.stop_reason == "refusal" and question in self.unavailable_after_refusal:
+                    raise AssistantUnavailableError("The AI service is busy. Try again.")
                 attempts.append(Attempt(None, "no SQL", reply.input_tokens, reply.output_tokens))
                 continue
             error = await validator.validate(sql)
@@ -245,11 +250,19 @@ class AlwaysValid:
 
 
 class FakeTaxiWiring:
-    def __init__(self) -> None:
+    def __init__(self, fail_with: Exception | None = None) -> None:
         self.schema_calls = 0
+        self.closed = False
+        self.fail_with = fail_with
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     async def schema_context(self) -> SchemaContext:
         self.schema_calls += 1
+        await asyncio.sleep(0)  # suspends, like reading through a worker pool
+        if self.fail_with is not None:
+            raise self.fail_with
         return SchemaContext(dialect="duckdb", text="CREATE TABLE trips (...);")
 
     def validator(self) -> Validator:

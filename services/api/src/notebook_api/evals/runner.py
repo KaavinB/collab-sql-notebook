@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from notebook_api.ai import pipeline
 from notebook_api.ai.pipeline import (
     Attempt,
     GenerationResult,
@@ -49,11 +50,9 @@ from notebook_api.evals.scoring import is_correct
 # Stored SQL is capped at the notebook's own SQL limit.
 _MAX_STORED_SQL_CHARS = 20_000
 
-# The pipeline's default cap on output tokens per model call (thinking
-# included). The runner passes max_output_tokens to generate_sql only when
-# a run asks for a different value, so it works with pipelines whose
-# signature doesn't have the parameter yet.
-DEFAULT_MAX_OUTPUT_TOKENS = 8000
+# The pipeline's own default cap on output tokens per model call (thinking
+# included), so the report states the cap the run really used.
+DEFAULT_MAX_OUTPUT_TOKENS = pipeline.MAX_OUTPUT_TOKENS
 
 # The exception the pipeline raises for a service failure. Matched by name so
 # the harness doesn't depend on where it's defined.
@@ -296,9 +295,7 @@ async def run_eval(
     progress = RunProgress(total=len(todo))
     results = _JsonLinesFile(results_path)
     semaphore = asyncio.Semaphore(concurrency)
-    options: dict[str, Any] = {"max_repairs": max_repairs}
-    if max_output_tokens != DEFAULT_MAX_OUTPUT_TOKENS:
-        options["max_output_tokens"] = max_output_tokens
+    options: dict[str, Any] = {"max_repairs": max_repairs, "max_output_tokens": max_output_tokens}
 
     async def one(model: str, question: EvalQuestion) -> None:
         async with semaphore:
@@ -362,20 +359,22 @@ async def _answer(
         result = await generate(**kwargs)
     except Exception as error:
         raised = f"{type(error).__name__}: {short_error(error)}"
-        if not recorder.refused:
+        service_failure = type(error).__name__ == SERVICE_FAILURE
+        # A service failure is never the model's answer, even after a refusal
+        # (e.g. the repair call after a refused first attempt couldn't reach
+        # the API): the question is retried on resume, not scored wrong.
+        if service_failure or not recorder.refused:
             # No answer yet: a service failure (or a bug). Recorded, left out
             # of every rate, and retried when the run is resumed.
             return {
                 **base,
                 "status": "failed",
                 "error": raised,
-                "error_kind": "service"
-                if type(error).__name__ == SERVICE_FAILURE
-                else "unexpected",
+                "error_kind": "service" if service_failure else "unexpected",
                 "replies": _replies_json(recorder),
             }
-        # The model had refused before the pipeline raised: the refusal is
-        # its answer (scored wrong below, with no SQL).
+        # The model had refused, then the pipeline raised for some other
+        # reason: the refusal is its answer (scored wrong below, with no SQL).
     latency_ms = round((time.perf_counter() - started) * 1000, 1)
 
     attempts = result.attempts if result is not None else []

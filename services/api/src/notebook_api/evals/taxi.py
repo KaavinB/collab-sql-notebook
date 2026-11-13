@@ -257,22 +257,114 @@ class TaxiAIWiring(Protocol):
     def validator(self) -> Validator: ...
 
 
-class TaxiWiringUnavailableError(Exception):
-    """The AI service's taxi schema context and validator aren't connected yet."""
+class TaxiSetupError(Exception):
+    """The taxi suite can't run as configured. The message says why; nothing was spent."""
 
 
-def default_taxi_wiring() -> TaxiAIWiring:
-    """The AI service's real schema context and validator for taxi.duckdb.
+class NotebookTaxiWiring:
+    """The assistant's own schema context and validator for taxi.duckdb.
 
-    Connected once notebook_api.ai.context and notebook_api.ai.validate
-    exist: return an object with `schema_context()` and `validator()`
-    built from them.
+    The taxi suite measures the notebook's assistant, so it asks the same way
+    the assistant does: the same schema text with sample values, and the same
+    validator (SELECT-only checks, then EXPLAIN on a query worker, with the
+    same server paths removed from errors). It runs its own query-worker
+    pool, in its own spill directory, started by the first call and stopped
+    by `aclose()`.
+
+    The CLI reads the schema once, before any model call, and refuses a
+    schema missing some sample values: every question in a run must see the
+    same prompt the product would send.
     """
-    raise TaxiWiringUnavailableError(
-        "the taxi suite needs the AI service's DuckDB schema context and validator "
-        "(notebook_api.ai.context / notebook_api.ai.validate), which aren't connected "
-        "to the eval yet; see evals/taxi.py default_taxi_wiring()"
-    )
+
+    def __init__(self, duckdb_path: Path) -> None:
+        # Imported here: the notebook's app modules are only needed for the
+        # taxi suite, and the BIRD suite shouldn't pay for loading them.
+        from pydantic import ValidationError
+
+        from notebook_api.config import Settings
+        from notebook_api.main import build_query_runner
+
+        # Its own spill directory: starting a pool deletes stale `worker-*`
+        # directories under its spill root, which would include those of a
+        # dev API sharing the default one.
+        self._spill = Path(tempfile.mkdtemp(prefix="notebook-eval-spill-"))
+        try:
+            # One worker: it only validates (EXPLAIN plans in milliseconds);
+            # the run's model calls dominate, and a validation that waits
+            # for the worker queues within the runner's queue timeout.
+            self._settings = Settings(
+                duckdb_path=duckdb_path, query_workers=1, query_spill_dir=self._spill
+            )
+        except ValidationError as error:
+            shutil.rmtree(self._spill, ignore_errors=True)
+            raise TaxiSetupError(
+                f"the API settings in the environment are invalid: {error}"
+            ) from None
+        runner = build_query_runner(self._settings)
+        if runner is None:  # pragma: no cover - duckdb_path is always set here
+            raise ValueError("a DuckDB path is required")
+        self._runner = runner
+        self._started = False
+        self._lock = asyncio.Lock()
+        self._schema: SchemaContext | None = None
+
+    @property
+    def query_limits(self) -> dict[str, Any]:
+        """The notebook query limits this run used (recorded in run.json)."""
+        return {
+            "query_timeout_seconds": self._settings.query_timeout_seconds,
+            "query_row_limit": self._settings.query_row_limit,
+        }
+
+    async def _ready(self) -> None:
+        if not self._started:
+            try:
+                await self._runner.start()
+            except Exception as error:
+                raise TaxiSetupError(f"the query workers couldn't start: {error}") from error
+            self._started = True
+
+    async def schema_context(self) -> SchemaContext:
+        from notebook_api.ai.context import read_schema_context
+
+        async with self._lock:
+            if self._schema is None:
+                await self._ready()
+                read = await read_schema_context(
+                    self._runner, row_limit=self._settings.query_row_limit
+                )
+                if not read.complete:
+                    raise TaxiSetupError(
+                        "some tables' sample values couldn't be read, so the schema isn't the "
+                        "one the assistant sends; try again"
+                    )
+                self._schema = read.context
+            return self._schema
+
+    def validator(self) -> Validator:
+        from notebook_api.ai.validate import DuckDbValidator, notebook_private_paths
+
+        wiring = self
+
+        class _Explainer:
+            async def explain(self, sql: str) -> None:
+                async with wiring._lock:
+                    await wiring._ready()
+                await wiring._runner.explain(sql)
+
+        return DuckDbValidator(
+            _Explainer(), notebook_private_paths(self._runner.db_path, self._runner.spill_root)
+        )
+
+    async def aclose(self) -> None:
+        if self._started:
+            await self._runner.close()
+            self._started = False
+        shutil.rmtree(self._spill, ignore_errors=True)
+
+
+def default_taxi_wiring(duckdb_path: Path) -> NotebookTaxiWiring:
+    return NotebookTaxiWiring(duckdb_path)
 
 
 class TaxiTarget:
@@ -280,11 +372,20 @@ class TaxiTarget:
         self._executor = executor
         self._wiring = wiring
         self._schema: SchemaContext | None = None
+        self._schema_lock = asyncio.Lock()
+
+    @property
+    def query_limits(self) -> dict[str, Any] | None:
+        """The notebook query limits the wiring used, if it reports them."""
+        limits = getattr(self._wiring, "query_limits", None)
+        return dict(limits) if isinstance(limits, dict) else None
 
     async def schema(self, database: str) -> SchemaContext:
-        if self._schema is None:
-            self._schema = await self._wiring.schema_context()
-        return self._schema
+        # Several questions ask at once; the schema is built by the first.
+        async with self._schema_lock:
+            if self._schema is None:
+                self._schema = await self._wiring.schema_context()
+            return self._schema
 
     def validator(self, database: str) -> Validator:
         return self._wiring.validator()

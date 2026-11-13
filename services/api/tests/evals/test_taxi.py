@@ -8,8 +8,8 @@ from notebook_api.evals.cli import DEFAULT_TAXI_QUESTIONS
 from notebook_api.evals.taxi import (
     DuckDbExecutor,
     TaxiQuestionsError,
+    TaxiSetupError,
     TaxiTarget,
-    TaxiWiringUnavailableError,
     check_gold_sql,
     default_taxi_wiring,
     load_taxi_questions,
@@ -146,6 +146,80 @@ def test_taxi_target_uses_the_ai_wiring(executor: DuckDbExecutor) -> None:
     assert wiring.schema_calls == 1  # built once per run
 
 
-def test_default_wiring_says_what_is_missing() -> None:
-    with pytest.raises(TaxiWiringUnavailableError, match=r"notebook_api\.ai\.context"):
-        default_taxi_wiring()
+def test_questions_asking_at_once_share_one_schema_read(executor: DuckDbExecutor) -> None:
+    wiring = FakeTaxiWiring()  # its schema_context suspends, like a real read
+    target = TaxiTarget(executor, wiring)
+
+    async def go() -> None:
+        schemas = await asyncio.gather(*(target.schema("taxi") for _ in range(4)))
+        assert len({id(schema) for schema in schemas}) == 1
+
+    asyncio.run(go())
+    assert wiring.schema_calls == 1
+
+
+def test_the_default_wiring_refuses_a_schema_missing_sample_values(
+    query_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A schema that lost some tables' samples isn't what the assistant sends.
+    from notebook_api.ai import context
+    from notebook_api.ai.pipeline import SchemaContext as Schema
+
+    async def partial(runner: object, *, row_limit: int) -> context.SchemaRead:
+        return context.SchemaRead(Schema(dialect="duckdb", text="t"), complete=False)
+
+    monkeypatch.setattr(context, "read_schema_context", partial)
+
+    async def go() -> None:
+        wiring = default_taxi_wiring(query_db)
+        try:
+            with pytest.raises(TaxiSetupError, match="sample values"):
+                await wiring.schema_context()
+        finally:
+            await wiring.aclose()
+
+    asyncio.run(go())
+
+
+def test_the_default_wiring_uses_its_own_spill_directory(query_db: Path, tmp_path: Path) -> None:
+    # Starting a pool deletes stale worker-* directories under its spill root;
+    # the eval must never do that to a dev API's.
+    shared = query_db.parent / "spill"
+    shared.mkdir(exist_ok=True)
+    live = shared / "worker-live"
+    live.mkdir(exist_ok=True)
+
+    async def go() -> None:
+        wiring = default_taxi_wiring(query_db)
+        own = wiring._spill
+        try:
+            await wiring.schema_context()
+            assert own.is_dir() and own != shared
+        finally:
+            await wiring.aclose()
+        assert not own.exists()
+
+    asyncio.run(go())
+    assert live.is_dir()
+
+
+def test_the_default_wiring_is_the_assistants_own_schema_and_validator(query_db: Path) -> None:
+    # The taxi suite asks the way the notebook's assistant does: its schema
+    # text (with sample values) and its validator (SELECT-only, then EXPLAIN
+    # on a query worker), on a pool it starts on first use and stops at the end.
+    async def go() -> None:
+        wiring = default_taxi_wiring(query_db)
+        try:
+            schema = await wiring.schema_context()
+            assert schema.dialect == "duckdb"
+            assert "nums" in schema.text
+            validator = wiring.validator()
+            assert await validator.validate("SELECT i FROM nums") is None
+            error = await validator.validate("SELECT nope FROM nums")
+            assert error is not None and "nope" in error
+            assert str(query_db) not in error  # server paths are removed
+            assert await validator.validate("DROP TABLE nums") is not None
+        finally:
+            await wiring.aclose()
+
+    asyncio.run(go())

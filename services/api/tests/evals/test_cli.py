@@ -8,7 +8,13 @@ import pytest
 from notebook_api.ai.pipeline import ModelClient
 from notebook_api.evals.cli import DEFAULT_TAXI_QUESTIONS, Dependencies, main
 from notebook_api.evals.clients import DryRunModelClient
-from notebook_api.evals.taxi import NOT_MEASURED, TaxiAIWiring, default_taxi_wiring
+from notebook_api.evals.taxi import (
+    NOT_MEASURED,
+    DuckDbExecutor,
+    TaxiAIWiring,
+    TaxiSetupError,
+    default_taxi_wiring,
+)
 from tests.evals.helpers import (
     QUESTIONS,
     FakeFetch,
@@ -50,8 +56,8 @@ class Harness:
         self.clients.append(client)
         return client
 
-    def wiring_factory(self) -> TaxiAIWiring:
-        return self.wiring if self.wiring is not None else default_taxi_wiring()
+    def wiring_factory(self, duckdb_path: Path) -> TaxiAIWiring:
+        return self.wiring if self.wiring is not None else default_taxi_wiring(duckdb_path)
 
     def main(self, *args: str) -> int:
         deps = Dependencies(
@@ -217,14 +223,41 @@ def test_taxi_suite_runs_with_the_ai_wiring(h: Harness) -> None:
     assert stats["accuracy"]["with_repair"]["successes"] == 1
 
 
-def test_taxi_suite_without_the_ai_wiring_stops_before_any_model_call(
+def test_the_taxi_wiring_is_closed_after_the_run(h: Harness) -> None:
+    # The real wiring runs a query-worker pool; it must always be stopped.
+    write_taxi_questions(h.taxi_questions)
+    wiring = h.wiring = FakeTaxiWiring()
+    assert h.run("--dry-run", "--run-id", "w") == 0
+    assert wiring.closed
+
+
+def test_a_taxi_setup_failure_stops_the_run_before_any_model_call(
     h: Harness, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # Even with BIRD in the same run: the taxi schema is read first, so a pool
+    # that can't start stops everything before anything is spent.
     write_taxi_questions(h.taxi_questions)
-    assert h.run("--dry-run", "--run-id", "w") == 1
-    assert "notebook_api.ai.context" in capsys.readouterr().err
+    wiring = h.wiring = FakeTaxiWiring(fail_with=TaxiSetupError("the query workers couldn't start"))
+    assert h.run("--dry-run", "--suite", "all", "--run-id", "s") == 1
+    assert "query workers couldn't start" in capsys.readouterr().err
     assert h.generate.calls == []
-    assert not h.run_dir("w").exists()
+    assert wiring.closed
+    assert not h.run_dir("s").exists()
+
+
+def test_cleanup_continues_past_a_failing_closer(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_taxi_questions(h.taxi_questions)
+    wiring = h.wiring = FakeTaxiWiring()
+
+    def broken_close(self: DuckDbExecutor) -> None:
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(DuckDbExecutor, "close", broken_close)
+    assert h.run("--dry-run", "--run-id", "c") == 0
+    assert wiring.closed  # closed after the executor's close failed
+    assert any("cleanup failed" in line for line in h.lines)
 
 
 def test_bad_taxi_gold_sql_stops_the_run(h: Harness, capsys: pytest.CaptureFixture[str]) -> None:

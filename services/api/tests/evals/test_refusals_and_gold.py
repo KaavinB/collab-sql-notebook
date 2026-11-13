@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from notebook_api.ai import pipeline
 from notebook_api.evals.bird import BirdDataset, ensure_dev_set
 from notebook_api.evals.bird_target import BirdTarget
 from notebook_api.evals.execution import ExecOutcome
@@ -132,15 +133,30 @@ def test_cut_off_answers_are_counted_per_model(dataset: BirdDataset, tmp_path: P
     assert summary_for(results)["cut_off"] == {"without_repair": 1, "with_repair": 0}
 
 
-def test_output_cap_is_passed_only_when_it_differs_from_the_default(
+def test_the_output_cap_is_always_passed_and_defaults_to_the_pipelines_own(
     dataset: BirdDataset, tmp_path: Path
 ) -> None:
+    # The report states the cap; it must be the one the pipeline really used.
     default = ScriptedGenerate(ANSWERS)
     run(dataset, tmp_path / "a.jsonl", default)
-    assert set(default.output_caps) == {None}
+    assert set(default.output_caps) == {pipeline.MAX_OUTPUT_TOKENS}
     custom = ScriptedGenerate(ANSWERS)
     run(dataset, tmp_path / "b.jsonl", custom, max_output_tokens=4000)
     assert set(custom.output_caps) == {4000}
+
+
+def test_a_service_failure_after_a_refusal_is_retried_not_scored(
+    dataset: BirdDataset, tmp_path: Path
+) -> None:
+    # The model refused, then the next call couldn't reach the API. A repair
+    # might still have succeeded, so this has no answer yet: unfinished.
+    results = tmp_path / "results.jsonl"
+    generate = ScriptedGenerate(ANSWERS, unavailable_after_refusal={LONDON})
+    progress = run(dataset, results, generate, clients={HAIKU: FakeModelClient(refuse_on="London")})
+    assert progress.failed == 1
+    [failed] = [r for r in load_records(results) if r["status"] == "failed"]
+    assert failed["id"] == "1" and failed["error_kind"] == "service"
+    assert summary_for(results)["failed_ids"] == ["1"]
 
 
 def test_gold_runs_once_per_run_and_is_reused_on_resume(

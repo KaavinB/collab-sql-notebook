@@ -206,7 +206,10 @@ FAKE_INVALID = "fake-invalid"  # every answer fails validation
 FAKE_REPAIR = "fake-repair"  # the first answer fails, the repaired one is valid
 FAKE_REFUSE = "fake-refuse"  # the model declines
 FAKE_SLOW = "fake-slow"  # answers after FAKE_SLOW_SECONDS (to see the "thinking" state)
-FAKE_SLOW_SECONDS = 2.0
+# Long enough for an e2e test to see the "thinking" state reach another
+# browser (NOTIFY, sync server, render) on a loaded machine, and well under
+# the e2e assertions' timeouts once it ends.
+FAKE_SLOW_SECONDS = 4.0
 
 FAKE_MODEL_NAME = "fake-model"
 FAKE_VALID_SQL = "SELECT count(*) AS trip_count FROM trips"

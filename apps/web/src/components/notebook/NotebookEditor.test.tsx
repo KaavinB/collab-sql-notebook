@@ -62,6 +62,11 @@ function renderEditor(overrides: Parameters<typeof fakeApi>[0] = {}) {
   const serve = async (state?: Uint8Array) => {
     await waitFor(() => expect(providers.created).toHaveLength(1));
     act(() => providers.latest().serve(state));
+    // The page also waits for the notebook's metadata (getNotebook); only
+    // once both have arrived is the notebook on screen. Asserting right after
+    // serve() without this raced that request (it failed now and then under
+    // load, showing "Connecting…" or "Loading notebook…").
+    await screen.findByTestId("sync-status");
   };
   return { api, providers, serve };
 }

@@ -53,6 +53,10 @@ export default defineConfig({
         AUTH_SECRET,
         SYNC_TICKET_SECRET,
         SYNC_PUBLIC_URL: SYNC_URL,
+        // The AI assistant answers from a deterministic fake: e2e runs need no
+        // key and can never spend money. The real key from .env is blanked.
+        AI_FAKE_MODEL: "true",
+        ANTHROPIC_API_KEY: "",
         AUTH_DEV_LOGIN: "true",
         AUTH_COOKIE_SECURE: "false",
       },

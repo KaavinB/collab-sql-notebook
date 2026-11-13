@@ -31,6 +31,15 @@ class Explainer(Protocol):
     async def explain(self, sql: str) -> None: ...
 
 
+def notebook_private_paths(db_path: Path, spill_root: Path) -> list[Path]:
+    """Server paths removed from validation errors before they're logged or sent to the model.
+
+    The database file, its directory and the spill directory. Shared by the
+    notebook's assistant and the eval, so both see exactly the same errors.
+    """
+    return [db_path, db_path.parent, spill_root]
+
+
 class DuckDbValidator:
     """The pipeline's Validator for the notebook database."""
 

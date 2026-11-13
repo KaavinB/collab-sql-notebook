@@ -1,30 +1,6 @@
-import { expect, test, type Browser } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
-import { api, cellText, openNotebook } from "./helpers";
-
-/**
- * Two people, each in their own browser context (separate cookies, separate
- * tabs), on the same notebook through the real API and sync server.
- */
-async function twoPeople(browser: Browser, role: "editor" | "viewer") {
-  const ada = await (await browser.newContext()).newPage();
-  const grace = await (await browser.newContext()).newPage();
-  await api.signIn(ada, `Ada ${Date.now()}`);
-  await api.signIn(grace, `Grace ${Date.now()}`);
-  const notebookId = await api.createNotebook(ada, `E2E collab ${Date.now()}`);
-  const token = await api.shareLink(ada, notebookId, role);
-  // Grace joins through the share link, which opens the notebook.
-  await grace.goto(`/share/${token}`);
-  await expect(grace).toHaveURL(new RegExp(`/notebooks/${notebookId}$`));
-  await expect(grace.getByTestId("sync-status")).toHaveText("Live");
-  await openNotebook(ada, notebookId);
-  const close = async () => {
-    await api.deleteNotebook(ada, notebookId);
-    await ada.context().close();
-    await grace.context().close();
-  };
-  return { ada, grace, notebookId, close };
-}
+import { cellText, twoPeople } from "./helpers";
 
 test("two editors type in the same cell at once and end up with the same text", async ({
   browser,

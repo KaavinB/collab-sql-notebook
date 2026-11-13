@@ -260,3 +260,25 @@ async def test_explain_failures_say_why(model_reply: pipeline.ModelReply, expect
     result = await explain_sql(sql="SELECT 1", schema=SCHEMA, client=ScriptedClient([model_reply]))
     assert result.attempts[0].error == expected
     assert result.explanation == expected
+
+
+@pytest.mark.parametrize("evidence", [None, "A trip is long when trip_distance > 10."])
+async def test_the_first_call_is_the_same_with_and_without_the_repair_loop(
+    evidence: str | None,
+) -> None:
+    # The eval scores "without repair" from the first attempt of a run with
+    # repairs on. That's only honest if the first request is exactly what a
+    # run with repairs off (max_repairs=0) would send.
+    script = [sql_reply("SELECT nope FROM trips"), sql_reply("SELECT 1 FROM trips")]
+    with_repairs, without = ScriptedClient(script), ScriptedClient(script)
+    for client, repairs in [(with_repairs, 2), (without, 0)]:
+        await generate_sql(
+            question="Long trips?",
+            schema=SCHEMA,
+            validator=TableValidator(BROKEN),
+            client=client,
+            max_repairs=repairs,
+            evidence=evidence,
+        )
+    assert len(without.calls) == 1 and len(with_repairs.calls) == 2  # the loop did run
+    assert with_repairs.calls[0] == without.calls[0]

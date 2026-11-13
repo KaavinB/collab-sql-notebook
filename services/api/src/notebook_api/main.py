@@ -15,7 +15,7 @@ from notebook_api.ai.context import SchemaCache
 from notebook_api.ai.pipeline import ModelClient
 from notebook_api.ai.routes import router as ai_router
 from notebook_api.ai.service import AiService
-from notebook_api.ai.validate import DuckDbValidator
+from notebook_api.ai.validate import DuckDbValidator, notebook_private_paths
 from notebook_api.auth.origin_check import OriginCheckMiddleware
 from notebook_api.auth.routes import router as auth_router
 from notebook_api.body_limit import BodyLimitMiddleware
@@ -85,8 +85,7 @@ def build_ai_service(
         client, fallbacks = claude, claude.uses_fallbacks
     else:
         return None
-    # Removed from validation errors before they're logged or sent to the model.
-    private_paths = [runner.db_path, runner.db_path.parent, runner.spill_root]
+    private_paths = notebook_private_paths(runner.db_path, runner.spill_root)
     return AiService(
         sessions,
         client,
