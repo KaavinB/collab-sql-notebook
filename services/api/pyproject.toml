@@ -1,0 +1,49 @@
+[project]
+name = "notebook-api"
+version = "0.1.0"
+description = "REST API, query execution and AI service for the collaborative SQL notebook"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.162.5",
+    "pydantic-settings>=2.16.2",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+notebook-api = "notebook_api.main:run"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.16.0",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "ruff>=0.17.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+# E/F: pyflakes + pycodestyle, I: import order, B: bugbear, UP: modern syntax,
+# S: bandit security checks, ASYNC: blocking calls in async code, RUF: ruff-specific.
+select = ["E", "F", "I", "B", "UP", "S", "ASYNC", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is how pytest checks things.
+"tests/**" = ["S101"]
+
+[tool.mypy]
+strict = true
+# Type-checks pydantic model and settings constructors (field names and types).
+plugins = ["pydantic.mypy"]
+python_version = "3.14"
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"

@@ -1,0 +1,32 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# dependencies and builds
+node_modules/
+.next/
+dist/
+build/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# data and local databases
+data/raw/
+*.duckdb
+*.duckdb.wal
+*.parquet
+
+# OS and editor
+.DS_Store
+.idea/
+.vscode/
+
+# tests and tooling caches
+coverage/
+.ruff_cache/
+.mypy_cache/
+*.tsbuildinfo
+next-env.d.ts
