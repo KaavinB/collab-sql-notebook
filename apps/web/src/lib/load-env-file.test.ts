@@ -1,17 +1,24 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { loadEnvFile } from "@/lib/load-env-file";
 
+const tempDirs: string[] = [];
+
 function tempEnvFile(contents: string): string {
   const dir = mkdtempSync(path.join(tmpdir(), "env-test-"));
+  tempDirs.push(dir);
   const file = path.join(dir, ".env");
   writeFileSync(file, contents);
   return file;
 }
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 describe("loadEnvFile", () => {
   it("loads variables from the file", () => {
@@ -32,5 +39,11 @@ describe("loadEnvFile", () => {
     const env: Record<string, string | undefined> = {};
     expect(loadEnvFile("/definitely/not/here/.env", env)).toEqual([]);
     expect(env).toEqual({});
+  });
+
+  it("throws on read errors other than a missing file", () => {
+    const dir = path.dirname(tempEnvFile(""));
+    // Reading a directory fails with EISDIR, which must not be swallowed.
+    expect(() => loadEnvFile(dir, {})).toThrow(/EISDIR/);
   });
 });

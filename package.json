@@ -12,6 +12,7 @@
     "lint": "pnpm -r lint && pnpm api ruff check . && pnpm api ruff format --check .",
     "typecheck": "pnpm -r typecheck && pnpm api mypy",
     "test": "pnpm -r test && pnpm api pytest -q",
-    "check": "pnpm lint && pnpm typecheck && pnpm test"
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "ingest": "uv run --directory services/api notebook-ingest --data-dir ../../data"
   }
 }
