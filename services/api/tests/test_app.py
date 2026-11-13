@@ -8,20 +8,6 @@ from notebook_api.main import create_app
 ALLOWED = "http://localhost:3000"
 
 
-@pytest.fixture(autouse=True)
-def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Tests may run under `uv run --env-file`; don't let a developer's .env leak in.
-    for name in (
-        "API_HOST",
-        "API_PORT",
-        "API_RELOAD",
-        "API_CORS_ORIGINS",
-        "API_ALLOWED_HOSTS",
-        "DUCKDB_PATH",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-
 def _client() -> TestClient:
     # TestClient sends Host: testserver.
     settings = Settings(api_cors_origins=[ALLOWED], api_allowed_hosts=["testserver"])
@@ -106,3 +92,22 @@ def test_allowed_hosts_parse_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_process_memory_cap_must_exceed_duckdb_limit() -> None:
     with pytest.raises(ValidationError, match="QUERY_PROCESS_MEMORY_CAP_MB"):
         Settings(query_memory_limit_mb=1024, query_process_memory_cap_mb=1024)
+
+
+@pytest.mark.parametrize(
+    ("url", "allowed"),
+    [
+        ("postgresql+psycopg://u:p@localhost/notebook_test", True),
+        ("postgresql+psycopg://u:p@localhost/notebook", False),
+        ("postgresql+psycopg://u:p@localhost/test_notebook", False),
+        ("postgresql+psycopg://u:p@localhost/", False),
+    ],
+)
+def test_tests_refuse_a_database_not_named_test(url: str, allowed: bool) -> None:
+    from tests.conftest import require_test_database
+
+    if allowed:
+        assert require_test_database(url) == url
+    else:
+        with pytest.raises(ValueError, match="must end in '_test'"):
+            require_test_database(url)

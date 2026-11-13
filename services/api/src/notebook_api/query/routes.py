@@ -13,11 +13,11 @@ router = APIRouter()
 
 # Generous for hand-written or AI-written queries, and keeps parsing cheap:
 # sqlglot is pure Python, so parse time grows with the query's length.
-_MAX_SQL_CHARS = 20_000
+MAX_SQL_CHARS = 20_000
 
 
 class QueryRequest(BaseModel):
-    sql: str = Field(min_length=1, max_length=_MAX_SQL_CHARS)
+    sql: str = Field(min_length=1, max_length=MAX_SQL_CHARS)
 
 
 ErrorKind = Literal["rejected", "error", "timeout", "busy", "crashed", "unavailable"]

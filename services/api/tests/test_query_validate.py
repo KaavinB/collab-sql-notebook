@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from notebook_api.query.validate import QueryRejectedError, prepare_query
@@ -87,6 +89,35 @@ def test_rejects_functions_that_run_sql_strings(sql: str) -> None:
 def test_tokenizer_errors_are_rejections_not_crashes(sql: str) -> None:
     with pytest.raises(QueryRejectedError, match="Could not parse"):
         prepare_query(sql, row_limit=100)
+
+
+def _nested_parens(depth: int) -> str:
+    return "select " + "(" * depth + "1" + ")" * depth
+
+
+def _nested_subqueries(depth: int) -> str:
+    return "select * from " + "(select * from " * depth + "nums" + ")" * depth
+
+
+@pytest.mark.parametrize("on_thread", [False, True], ids=["main", "thread"])
+def test_nesting_limits_documented_in_d17(on_thread: bool) -> None:
+    # Pins the limits quoted in DECISIONS.md D17, with a margin, on the main
+    # thread and on a worker thread (where the API parses). If a sqlglot or
+    # Python upgrade moves them, this fails and D17 needs updating.
+    def check() -> None:
+        prepare_query(_nested_parens(40), row_limit=100)
+        prepare_query(_nested_subqueries(85), row_limit=100)
+        prepare_query("select " + " + ".join(["1"] * 300), row_limit=100)
+        with pytest.raises(QueryRejectedError, match="nested too deeply"):
+            prepare_query(_nested_parens(50), row_limit=100)
+        with pytest.raises(QueryRejectedError, match="nested too deeply"):
+            prepare_query(_nested_subqueries(100), row_limit=100)
+
+    if on_thread:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(check).result()
+    else:
+        check()
 
 
 def test_absurd_nesting_is_a_rejection_not_a_crash() -> None:

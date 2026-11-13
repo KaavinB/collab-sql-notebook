@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     # Auto-reload on file changes. Dev only; off unless API_RELOAD=true.
     api_reload: bool = False
 
+    # --- Database (PostgreSQL) ---
+    # SQLAlchemy URL using the psycopg 3 driver. Unset means notebook routes
+    # answer 503. Schema changes go through Alembic (`pnpm db:migrate`).
+    database_url: str | None = None
+    # Largest Yjs snapshot accepted from a client (D7).
+    snapshot_max_bytes: int = Field(default=10_000_000, ge=1_000)
+
     # --- Query engine (D3, D4, D5) ---
     # The DuckDB file built by `pnpm ingest`. Unset means /query answers 503.
     # A relative path resolves against the API's working directory

@@ -4,11 +4,14 @@ version = "0.1.0"
 description = "REST API, query execution and AI service for the collaborative SQL notebook"
 requires-python = ">=3.14"
 dependencies = [
+    "alembic>=1.20.1",
     "duckdb>=2.0.0",
     "fastapi>=0.162.5",
+    "psycopg[binary]>=3.3.9",
     "pydantic-settings>=2.16.2",
     # DuckDB needs pytz to return TIMESTAMP WITH TIME ZONE values to Python.
     "pytz>=2026.6",
+    "sqlalchemy[asyncio]>=2.1.8",
     "sqlglot>=30.31.0",
     "uvicorn[standard]>=0.54.0",
 ]

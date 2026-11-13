@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from notebook_api.config import Settings
+from notebook_api.db.session import create_engine, make_sessionmaker
+from notebook_api.notebooks.routes import router as notebooks_router
 from notebook_api.query.engine import EngineLimits
 from notebook_api.query.routes import router as query_router
 from notebook_api.query.runner import QueryRunner
@@ -42,17 +44,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.settings = settings
+        engine = create_engine(settings.database_url) if settings.database_url else None
+        app.state.sessions = make_sessionmaker(engine) if engine else None
         runner = build_query_runner(settings)
-        if runner is not None:
-            # Fails startup loudly if the database is missing or a worker can't
-            # open it, rather than failing on the first query.
-            await runner.start()
-        app.state.query_runner = runner
         try:
+            if runner is not None:
+                # Fails startup loudly if the database is missing or a worker
+                # can't open it, rather than failing on the first query.
+                await runner.start()
+            app.state.query_runner = runner
             yield
         finally:
             if runner is not None:
                 await runner.close()
+            if engine is not None:
+                await engine.dispose()
 
     app = FastAPI(title="Collab SQL Notebook API", lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.api_allowed_hosts)
@@ -68,6 +75,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(query_router)
+    app.include_router(notebooks_router)
     return app
 
 

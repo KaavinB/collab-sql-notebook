@@ -11,8 +11,11 @@
     "api": "uv run --directory services/api",
     "lint": "pnpm -r lint && pnpm api ruff check . && pnpm api ruff format --check .",
     "typecheck": "pnpm -r typecheck && pnpm api mypy",
-    "test": "pnpm -r test && pnpm api pytest -q",
+    "test": "pnpm -r test && pnpm test:api",
     "check": "pnpm lint && pnpm typecheck && pnpm test",
-    "ingest": "uv run --directory services/api notebook-ingest --data-dir ../../data"
+    "ingest": "uv run --directory services/api notebook-ingest --data-dir ../../data",
+    "db:migrate": "uv run --directory services/api --env-file ../../.env alembic upgrade head",
+    "db:revision": "uv run --directory services/api --env-file ../../.env alembic revision --autogenerate -m",
+    "test:api": "uv run --directory services/api --env-file ../../.env pytest -q"
   }
 }
