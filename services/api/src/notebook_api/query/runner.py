@@ -145,6 +145,14 @@ class QueryRunner:
         )
         self._closed = False
 
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
+    @property
+    def spill_root(self) -> Path:
+        return self._spill_root
+
     async def start(self) -> None:
         if not self._db_path.is_file():
             raise FileNotFoundError(f"DuckDB database not found: {self._db_path} (run pnpm ingest)")
@@ -180,6 +188,22 @@ class QueryRunner:
 
         Raises QueryRejectedError (invalid SQL) or QueryFailedError.
         """
+        reply = await self._call(sql, "run")
+        # Built by engine.execute in our own worker code, so its shape is known.
+        return cast(QueryResult, reply["result"])
+
+    async def explain(self, sql: str) -> None:
+        """Validate `sql` and have DuckDB plan it without running it.
+
+        Returns if it plans. Raises QueryRejectedError (not a single SELECT)
+        or QueryFailedError: kind "error" (DuckDB can't bind or plan it, with
+        DuckDB's message), "timeout", "busy" or "crashed". Same checks, worker
+        pool, timeout and kill-on-overrun as run().
+        """
+        await self._call(sql, "explain")
+
+    async def _call(self, sql: str, mode: Literal["run", "explain"]) -> dict[str, Any]:
+        """Send one validated query to an idle worker and return its successful reply."""
         # Parsing is CPU-bound; keep it off the event loop.
         prepared = await asyncio.to_thread(prepare_query, sql, self._limits.row_limit)
         try:
@@ -193,7 +217,8 @@ class QueryRunner:
         healthy = False
         try:
             try:
-                worker.conn.send_bytes(json.dumps({"id": request_id, "sql": prepared.sql}).encode())
+                message = {"id": request_id, "sql": prepared.sql, "mode": mode}
+                worker.conn.send_bytes(json.dumps(message).encode())
             except OSError:
                 # A worker may die while idle, before we ever start waiting
                 # for its reply. Treat a failed send like a failed receive.
@@ -216,8 +241,7 @@ class QueryRunner:
                 self._retire(worker)
 
         if reply["ok"]:
-            # Built by engine.execute in our own worker code, so its shape is known.
-            return cast(QueryResult, reply["result"])
+            return reply
         raise QueryFailedError(reply["kind"], reply["message"])
 
     async def _wait_for_reply(self, worker: _Worker, request_id: str) -> dict[str, Any]:

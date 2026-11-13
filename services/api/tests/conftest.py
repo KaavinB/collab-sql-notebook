@@ -29,6 +29,10 @@ _APP_ENV_PREFIXES = (
     "GITHUB_",
     "GOOGLE_",
     "SYNC_",
+    # Never let a developer's real key or model settings reach a test: tests
+    # use fake model clients and must never call the Anthropic API.
+    "AI_",
+    "ANTHROPIC_",
 )
 
 

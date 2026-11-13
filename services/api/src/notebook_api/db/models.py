@@ -236,6 +236,8 @@ class AiRequest(Base):
     __tablename__ = "ai_requests"
     __table_args__ = (
         Index("ix_ai_requests_notebook_cell_created", "notebook_id", "cell_id", "created_at"),
+        # Deleting a user sets user_id to NULL here (ON DELETE SET NULL).
+        Index("ix_ai_requests_user_id", "user_id"),
         CheckConstraint("kind IN ('generate', 'fix', 'explain')", name="ck_ai_requests_kind"),
         CheckConstraint(
             "status IN ('running', 'succeeded', 'failed')", name="ck_ai_requests_status"
@@ -251,7 +253,9 @@ class AiRequest(Base):
     prompt: Mapped[dict[str, Any]] = mapped_column(JSON)
     model: Mapped[str] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(16))
-    # One entry per model call: {"sql", "error", "input_tokens", "output_tokens"}.
+    # One entry per model call: {"sql", "error", "input_tokens", "output_tokens",
+    # "model"}, where "model" is the model that answered (it differs from
+    # `model` when a refused request was retried on a fallback model).
     attempts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     input_tokens: Mapped[int] = mapped_column(default=0)
     output_tokens: Mapped[int] = mapped_column(default=0)
@@ -271,6 +275,10 @@ class AiSuggestion(Base):
     __tablename__ = "ai_suggestions"
     __table_args__ = (
         Index("ix_ai_suggestions_notebook_cell", "notebook_id", "cell_id"),
+        # The sync server finds a request's suggestion by request_id.
+        Index("ix_ai_suggestions_request_id", "request_id"),
+        # Deleting a user sets decided_by to NULL here (ON DELETE SET NULL).
+        Index("ix_ai_suggestions_decided_by", "decided_by"),
         CheckConstraint("kind IN ('generate', 'fix', 'explain')", name="ck_ai_suggestions_kind"),
         CheckConstraint(
             "status IN ('pending', 'accepted', 'rejected')", name="ck_ai_suggestions_status"

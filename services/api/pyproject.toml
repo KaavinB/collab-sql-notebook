@@ -5,6 +5,7 @@ description = "REST API, query execution and AI service for the collaborative SQ
 requires-python = ">=3.14"
 dependencies = [
     "alembic>=1.20.1",
+    "anthropic==2.3.0",
     "duckdb>=2.0.0",
     "fastapi>=0.162.5",
     "httpx2>=2.16.0",

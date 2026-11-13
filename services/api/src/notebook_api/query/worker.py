@@ -12,9 +12,10 @@ parent treats whatever comes back as data: unpickling would let a
 compromised worker run code in the API process.
 
 Parent -> worker:  {"db_path": str, "spill_dir": str, "limits": {...}} once, first
-                   {"id": str, "sql": str}
+                   {"id": str, "sql": str, "mode": "run" | "explain"}  ("mode" defaults to "run")
 Worker -> parent:  {"ready": true} once, after opening DuckDB (or {"ready": false, "message": str})
-                   {"id": str, "ok": true, "result": {...}}
+                   {"id": str, "ok": true, "result": {...}}   (run)
+                   {"id": str, "ok": true, "result": null}    (explain: it planned)
                    {"id": str, "ok": false, "kind": "timeout" | "error", "message": str}
 """
 
@@ -27,10 +28,18 @@ from pathlib import Path
 
 import duckdb
 
-from notebook_api.query.engine import EngineLimits, QueryTimeoutError, execute, open_connection
+from notebook_api.query.engine import (
+    EngineLimits,
+    QueryTimeoutError,
+    execute,
+    explain,
+    open_connection,
+)
 from notebook_api.query.validate import PreparedQuery
 
 _OUT_OF_MEMORY = "The query needed more memory than a worker is allowed."
+# "run" executes and returns rows; "explain" only plans (AI answer validation).
+_MODES = frozenset({"run", "explain"})
 # The config message is a few hundred bytes; refuse anything absurd.
 _MAX_CONFIG_BYTES = 64_000
 
@@ -80,8 +89,17 @@ def worker_main(conn: Connection) -> None:
         except EOFError:  # parent closed the pipe (or exited): shut down
             return
         request_id = request["id"]
+        mode = request.get("mode", "run")
+        if mode not in _MODES:
+            _send(conn, {"id": request_id, "ok": False, "kind": "error", "message": "Bad request."})
+            continue
         try:
-            result = execute(con, PreparedQuery(sql=request["sql"]), limits)
+            query = PreparedQuery(sql=request["sql"])
+            if mode == "explain":
+                explain(con, query, limits)
+                result = None
+            else:
+                result = execute(con, query, limits)
         except QueryTimeoutError as error:
             _send(conn, {"id": request_id, "ok": False, "kind": "timeout", "message": str(error)})
         except duckdb.OutOfMemoryException:

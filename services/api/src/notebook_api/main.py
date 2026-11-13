@@ -8,7 +8,14 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from notebook_api.ai.client import FAKE_MODEL_NAME, AnthropicModelClient, FakeModelClient
+from notebook_api.ai.context import SchemaCache
+from notebook_api.ai.pipeline import ModelClient
+from notebook_api.ai.routes import router as ai_router
+from notebook_api.ai.service import AiService
+from notebook_api.ai.validate import DuckDbValidator
 from notebook_api.auth.origin_check import OriginCheckMiddleware
 from notebook_api.auth.routes import router as auth_router
 from notebook_api.body_limit import BodyLimitMiddleware
@@ -45,11 +52,60 @@ def build_query_runner(settings: Settings) -> QueryRunner | None:
     )
 
 
+def build_ai_service(
+    settings: Settings,
+    sessions: async_sessionmaker[AsyncSession] | None,
+    runner: QueryRunner | None,
+    model_client: ModelClient | None = None,
+) -> AiService | None:
+    """The AI assistant, or None (its routes answer 503) if it can't work here.
+
+    It needs the database (requests are logged and suggestions stored), the
+    query engine (schema and validation) and a model: `model_client` (tests),
+    the fake model (AI_FAKE_MODEL), or Claude with ANTHROPIC_API_KEY.
+    """
+    if sessions is None or runner is None:
+        return None
+    model_name: str = settings.ai_model
+    # Whether a refused request may be retried on a fallback model: only
+    # Claude itself, and only for the models that have one.
+    fallbacks = False
+    client: ModelClient
+    if model_client is not None:
+        client = model_client
+    elif settings.ai_fake_model:
+        client, model_name = FakeModelClient(), FAKE_MODEL_NAME
+    elif settings.anthropic_api_key is not None:
+        claude = AnthropicModelClient(
+            api_key=settings.anthropic_api_key.get_secret_value(),
+            model=settings.ai_model,
+            effort=settings.ai_effort,
+            fallbacks=settings.ai_refusal_fallbacks,
+        )
+        client, fallbacks = claude, claude.uses_fallbacks
+    else:
+        return None
+    # Removed from validation errors before they're logged or sent to the model.
+    private_paths = [runner.db_path, runner.db_path.parent, runner.spill_root]
+    return AiService(
+        sessions,
+        client,
+        model_name,
+        SchemaCache(runner, settings.query_row_limit),
+        DuckDbValidator(runner, private_paths),
+        max_concurrent=settings.ai_max_concurrent,
+        # Logged with every request, so results can be compared across settings.
+        logged_settings={"effort": settings.ai_effort, "refusal_fallbacks": fallbacks},
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     oauth_transport: httpx2.AsyncBaseTransport | None = None,
+    model_client: ModelClient | None = None,
 ) -> FastAPI:
-    """The app. `oauth_transport` replaces the network for OAuth calls (tests)."""
+    """The app. In tests, `oauth_transport` replaces the network for OAuth calls
+    and `model_client` replaces the AI model."""
     settings = settings or Settings()
 
     @asynccontextmanager
@@ -60,6 +116,7 @@ def create_app(
         app.state.sessions = make_sessionmaker(engine) if engine else None
         runner = build_query_runner(settings)
         executions: Executions | None = None
+        ai: AiService | None = None
         try:
             if runner is not None:
                 # Fails startup loudly if the database is missing or a worker
@@ -69,10 +126,15 @@ def create_app(
             if runner is not None and app.state.sessions is not None:
                 executions = Executions(app.state.sessions, runner, lock_ttl_seconds(settings))
             app.state.executions = executions
+            ai = build_ai_service(settings, app.state.sessions, runner, model_client)
+            app.state.ai = ai
             yield
         finally:
-            # Executions first: each releases its cell's lock in Postgres,
-            # which needs the database engine still open.
+            # AI requests and executions first: each marks its row failed or
+            # releases its cell's lock in Postgres, which needs the database
+            # engine (and, for AI requests, the query runner) still open.
+            if ai is not None:
+                await ai.close()
             if executions is not None:
                 await executions.close()
             if runner is not None:
@@ -108,6 +170,7 @@ def create_app(
     app.include_router(notebooks_router)
     app.include_router(members_router)
     app.include_router(share_links_router)
+    app.include_router(ai_router)
     install_error_handlers(app)  # last: it reads the finished route schema
     return app
 

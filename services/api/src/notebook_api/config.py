@@ -7,11 +7,14 @@ looks for a .env file itself, so it behaves the same however it's installed.
 
 import ipaddress
 from pathlib import Path
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+AiModel = Literal["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]
+AiEffort = Literal["low", "medium", "high"]
 
 
 class Settings(BaseSettings):
@@ -101,6 +104,36 @@ class Settings(BaseSettings):
     # Handed to the browser together with each ticket.
     sync_public_url: str = "ws://localhost:8020"
 
+    # --- AI assistant ---
+    # The Anthropic API key. Unset means the AI routes answer 503. It's only
+    # ever sent to the Anthropic API: never logged, never passed to query
+    # workers (they start with an allowlisted environment).
+    anthropic_api_key: SecretStr | None = None
+    # Which Claude model answers. A short allowlist: these are the models the
+    # client's request shape (effort, adaptive thinking, refusal fallbacks)
+    # has been written for.
+    ai_model: AiModel = "claude-haiku-5-5"
+    # How much the model thinks before answering. Sent on every request,
+    # because the models' own defaults differ (Haiku 5.5 and Opus 5.5 default
+    # to medium, Sonnet 5.5 to high) and comparisons need the same level.
+    ai_effort: AiEffort = "medium"
+    # When the model declines a request, let the API retry it on the fallback
+    # model Anthropic recommends for that kind of refusal. Only Sonnet 5.5 and
+    # Opus 5.5 have a server-side fallback; ignored for Haiku 5.5.
+    ai_refusal_fallbacks: bool = True
+    # AI requests this API process runs at once; past it, new ones are
+    # refused as busy (503) rather than queued. Each request makes its model
+    # calls and EXPLAINs one at a time, so this bounds both the calls in
+    # flight against the Anthropic rate limit and how many EXPLAINs can
+    # compete with people's queries for the query workers (QUERY_WORKERS,
+    # default 2). 4 lets a few people use the assistant at once. A starting
+    # value, not tuned; per process, so several API processes multiply it.
+    ai_max_concurrent: int = Field(default=4, ge=1, le=64)
+    # Answer with canned, deterministic replies instead of calling Claude, so
+    # end-to-end tests run without a key. Same loopback-only rule as
+    # AUTH_DEV_LOGIN: refused anywhere a real user could reach it.
+    ai_fake_model: bool = False
+
     @field_validator(
         "auth_secret",
         "github_client_id",
@@ -108,6 +141,7 @@ class Settings(BaseSettings):
         "google_client_id",
         "google_client_secret",
         "sync_ticket_secret",
+        "anthropic_api_key",
         mode="before",
     )
     @classmethod
@@ -178,21 +212,38 @@ class Settings(BaseSettings):
         loopback too (a deployment can't work without its public host in
         those), and cookies must be the plain-HTTP dev kind.
         """
-        if not self.auth_dev_login:
-            return self
-        hosts = [
-            self.api_host,
-            *self.api_allowed_hosts,
-            urlsplit(self.web_url).hostname or "",
-            urlsplit(self.api_public_url).hostname or "",
-        ]
-        if not all(_is_loopback(host) for host in hosts) or self.auth_cookie_secure:
+        if self.auth_dev_login and not self._local_only():
             raise ValueError(
                 "AUTH_DEV_LOGIN lets anyone create and use test accounts without a "
                 "provider; it requires API_HOST, API_ALLOWED_HOSTS, WEB_URL and "
                 "API_PUBLIC_URL to be loopback-only and AUTH_COOKIE_SECURE=false"
             )
         return self
+
+    @model_validator(mode="after")
+    def _fake_model_only_on_loopback(self) -> Self:
+        """The fake model only for a server nobody else can reach (as dev sign-in).
+
+        Its canned answers would otherwise reach real users as if they came
+        from the assistant.
+        """
+        if self.ai_fake_model and not self._local_only():
+            raise ValueError(
+                "AI_FAKE_MODEL answers with canned test replies; it requires API_HOST, "
+                "API_ALLOWED_HOSTS, WEB_URL and API_PUBLIC_URL to be loopback-only and "
+                "AUTH_COOKIE_SECURE=false"
+            )
+        return self
+
+    def _local_only(self) -> bool:
+        """Whether every name this server answers to is loopback, with dev (non-Secure) cookies."""
+        hosts = [
+            self.api_host,
+            *self.api_allowed_hosts,
+            urlsplit(self.web_url).hostname or "",
+            urlsplit(self.api_public_url).hostname or "",
+        ]
+        return all(_is_loopback(host) for host in hosts) and not self.auth_cookie_secure
 
     @model_validator(mode="after")
     def _memory_cap_above_duckdb_limit(self) -> Self:

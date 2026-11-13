@@ -82,3 +82,63 @@ def access_changed(notebook_id: uuid.UUID, user_id: uuid.UUID) -> dict[str, Any]
 
 def notebook_deleted(notebook_id: uuid.UUID) -> dict[str, Any]:
     return {"type": "notebook_deleted", "notebook_id": str(notebook_id)}
+
+
+# --- the AI assistant -------------------------------------------------------------
+
+# ai_failed messages are cut to this many characters (the sync server writes
+# them into the cell for everyone to read).
+AI_FAILED_MESSAGE_MAX_CHARS = 300
+
+
+def ai_started(
+    notebook_id: uuid.UUID, cell_id: str, request_id: uuid.UUID, kind: str, user_name: str
+) -> dict[str, Any]:
+    return {
+        "type": "ai_started",
+        "notebook_id": str(notebook_id),
+        "cell_id": cell_id,
+        "request_id": str(request_id),
+        "kind": kind,
+        "user_name": user_name,
+    }
+
+
+def ai_suggestion(
+    notebook_id: uuid.UUID, cell_id: str, request_id: uuid.UUID, suggestion_id: uuid.UUID
+) -> dict[str, Any]:
+    """Carries only IDs: the suggestion's SQL can be far larger than a NOTIFY
+    payload may be, so the sync server reads it from `ai_suggestions`."""
+    return {
+        "type": "ai_suggestion",
+        "notebook_id": str(notebook_id),
+        "cell_id": cell_id,
+        "request_id": str(request_id),
+        "suggestion_id": str(suggestion_id),
+    }
+
+
+def ai_failed(
+    notebook_id: uuid.UUID, cell_id: str, request_id: uuid.UUID, message: str
+) -> dict[str, Any]:
+    if len(message) > AI_FAILED_MESSAGE_MAX_CHARS:
+        message = message[: AI_FAILED_MESSAGE_MAX_CHARS - 1] + "…"
+    return {
+        "type": "ai_failed",
+        "notebook_id": str(notebook_id),
+        "cell_id": cell_id,
+        "request_id": str(request_id),
+        "message": message,
+    }
+
+
+def ai_resolved(
+    notebook_id: uuid.UUID, cell_id: str, suggestion_id: uuid.UUID, decision: str
+) -> dict[str, Any]:
+    return {
+        "type": "ai_resolved",
+        "notebook_id": str(notebook_id),
+        "cell_id": cell_id,
+        "suggestion_id": str(suggestion_id),
+        "decision": decision,
+    }
