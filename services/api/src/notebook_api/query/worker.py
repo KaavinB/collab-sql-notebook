@@ -1,17 +1,24 @@
 """The query worker process: one locked-down DuckDB connection, one query at a time.
 
-Messages travel over a multiprocessing Pipe as JSON bytes, not pickle. The
-worker runs untrusted SQL, so the parent treats whatever comes back as data:
-unpickling would let a compromised worker run code in the API process.
+runner.py starts it as `python -I -m notebook_api.query.worker <fd>` with a
+minimal environment (see runner.worker_environment), so database passwords
+and API keys never reach the process that runs untrusted SQL: not in
+os.environ, and not in the process's initial environment block either
+(/proc/<pid>/environ on Linux). `<fd>` is the worker's end of a socket pair.
 
-Parent -> worker:  {"id": str, "sql": str}
-Worker -> parent:  {"ready": true} once, at startup (or {"ready": false, "message": str})
+Messages travel over that socket as length-prefixed JSON (multiprocessing's
+Connection framing), never pickle. The worker runs untrusted SQL, so the
+parent treats whatever comes back as data: unpickling would let a
+compromised worker run code in the API process.
+
+Parent -> worker:  {"db_path": str, "spill_dir": str, "limits": {...}} once, first
+                   {"id": str, "sql": str}
+Worker -> parent:  {"ready": true} once, after opening DuckDB (or {"ready": false, "message": str})
                    {"id": str, "ok": true, "result": {...}}
                    {"id": str, "ok": false, "kind": "timeout" | "error", "message": str}
 """
 
 import json
-import os
 import resource
 import signal
 import sys
@@ -24,11 +31,8 @@ from notebook_api.query.engine import EngineLimits, QueryTimeoutError, execute, 
 from notebook_api.query.validate import PreparedQuery
 
 _OUT_OF_MEMORY = "The query needed more memory than a worker is allowed."
-
-# Workers need locale and temporary-directory settings, not database passwords
-# or API keys. Clear inherited application credentials before opening DuckDB.
-# This reduces exposure inside the worker; it isn't an OS security boundary.
-_WORKER_ENV = frozenset({"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TMP", "TEMP"})
+# The config message is a few hundred bytes; refuse anything absurd.
+_MAX_CONFIG_BYTES = 64_000
 
 
 def _send(conn: Connection, message: dict[str, object]) -> None:
@@ -53,16 +57,18 @@ def cap_process_memory(cap_mb: int) -> bool:
     return True
 
 
-def worker_main(conn: Connection, db_path: str, spill_dir: str, limits: EngineLimits) -> None:
-    for name in list(os.environ):
-        if name not in _WORKER_ENV:
-            del os.environ[name]
+def worker_main(conn: Connection) -> None:
     # Ctrl-C in the terminal goes to the whole process group. The parent owns
     # shutdown, so workers ignore SIGINT instead of dying mid-reply.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
+        config = json.loads(conn.recv_bytes(_MAX_CONFIG_BYTES))
+    except EOFError, OSError:  # the parent gave up before configuring us
+        return
+    try:
+        limits = EngineLimits(**config["limits"])
         cap_process_memory(limits.process_memory_cap_mb)
-        con = open_connection(Path(db_path), Path(spill_dir), limits)
+        con = open_connection(Path(config["db_path"]), Path(config["spill_dir"]), limits)
     except Exception as error:  # report any startup failure to the parent
         _send(conn, {"ready": False, "message": str(error)})
         return
@@ -71,7 +77,7 @@ def worker_main(conn: Connection, db_path: str, spill_dir: str, limits: EngineLi
     while True:
         try:
             request = json.loads(conn.recv_bytes())
-        except EOFError:  # parent closed the pipe: shut down
+        except EOFError:  # parent closed the pipe (or exited): shut down
             return
         request_id = request["id"]
         try:
@@ -86,3 +92,11 @@ def worker_main(conn: Connection, db_path: str, spill_dir: str, limits: EngineLi
             _send(conn, {"id": request_id, "ok": False, "kind": "error", "message": str(error)})
         else:
             _send(conn, {"id": request_id, "ok": True, "result": result})
+
+
+def main() -> None:
+    worker_main(Connection(int(sys.argv[1])))
+
+
+if __name__ == "__main__":
+    main()

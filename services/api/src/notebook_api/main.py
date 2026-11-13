@@ -4,15 +4,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
 
 from notebook_api.body_limit import BodyLimitMiddleware
 from notebook_api.config import Settings
 from notebook_api.db.session import create_engine, make_sessionmaker
+from notebook_api.errors import install_error_handlers
 from notebook_api.notebooks.routes import router as notebooks_router
 from notebook_api.query.engine import EngineLimits
 from notebook_api.query.runner import QueryRunner
@@ -77,25 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["Content-Type"],
     )
 
-    @app.exception_handler(RequestValidationError)
-    async def invalid_request(request: Request, error: RequestValidationError) -> JSONResponse:
-        # FastAPI's default 422 includes the rejected input (including SQL or
-        # document contents). Keep errors small and never echo submitted data.
-        # Each error's location and message describe the rule, not the value
-        # (e.g. "body.sql: String should have at most 20000 characters").
-        problems = [
-            f"{'.'.join(str(part) for part in e.get('loc', ()))}: {e.get('msg', 'invalid')}"
-            for e in error.errors()[:3]
-        ]
-        return JSONResponse(
-            status_code=422,
-            content={
-                "detail": {
-                    "kind": "invalid",
-                    "message": "Invalid request: " + "; ".join(problems),
-                }
-            },
-        )
+    install_error_handlers(app)
 
     @app.get("/health")
     def health() -> dict[str, str]:

@@ -16,21 +16,23 @@ attached, so a reply larger than the pipe buffer then fails to read.)
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
-import multiprocessing
+import os
 import secrets
 import shutil
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from multiprocessing import Pipe
 from multiprocessing.connection import Connection
-from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from notebook_api.query.engine import EngineLimits, QueryResult
 from notebook_api.query.validate import prepare_query
-from notebook_api.query.worker import worker_main
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,37 @@ _RESPAWN_BACKOFF_MAX_SECONDS = 10.0
 _SPILL_DIR_PREFIX = "worker-"
 # Room for column metadata and JSON framing on top of the rows' size cap.
 _REPLY_OVERHEAD_BYTES = 1_000_000
+
+# The only environment variables a worker starts with: locale, time zone and
+# temp-directory settings. Database URLs, OAuth secrets and API keys never
+# reach the process that runs untrusted SQL.
+WORKER_ENV_NAMES = frozenset({"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TMP", "TEMP"})
+
+
+def worker_environment() -> dict[str, str]:
+    return {name: value for name, value in os.environ.items() if name in WORKER_ENV_NAMES}
+
+
+def worker_command(fd: int) -> list[str]:
+    """The command that starts one worker, talking over socket `fd`.
+
+    A fresh interpreter, not multiprocessing: a multiprocessing child always
+    inherits the parent's environment block, and there's no way to pass it
+    a different one. -I (isolated mode) also ignores PYTHON* variables, the
+    user's site-packages and the current directory.
+    """
+    return [sys.executable, "-I", "-m", "notebook_api.query.worker", str(fd)]
+
+
+def _start_process(fd: int) -> subprocess.Popen[bytes]:
+    """Blocking (fork + exec): run it in a thread."""
+    return subprocess.Popen(  # noqa: S603 (a fixed command, no shell, no user input)
+        worker_command(fd),
+        env=worker_environment(),
+        pass_fds=(fd,),  # every other descriptor is closed in the child
+        stdin=subprocess.DEVNULL,
+    )
+
 
 FailureKind = Literal["timeout", "error", "busy", "crashed"]
 
@@ -61,7 +94,7 @@ class WorkerStartError(Exception):
 # eq=False keeps identity hashing, so workers can live in a set.
 @dataclass(eq=False)
 class _Worker:
-    process: BaseProcess
+    process: subprocess.Popen[bytes]
     conn: Connection
     spill_dir: Path
 
@@ -83,9 +116,6 @@ class QueryRunner:
         self._size = workers
         self._queue_timeout = queue_timeout_seconds
         self._max_reply_bytes = limits.max_result_bytes + _REPLY_OVERHEAD_BYTES
-        # spawn, not fork: forking a process that has threads (DuckDB, uvicorn)
-        # can copy locks in a held state and deadlock the child.
-        self._ctx = multiprocessing.get_context("spawn")
         self._idle: asyncio.Queue[_Worker] = asyncio.Queue()
         self._all: set[_Worker] = set()
         # Retired workers until they're confirmed dead (close() kills these too).
@@ -214,19 +244,26 @@ class QueryRunner:
         )
 
     async def _spawn(self) -> _Worker:
+        """Start one worker and wait for it to open DuckDB.
+
+        The worker is a new interpreter (fork + exec), never a bare fork:
+        forking a process that has threads (DuckDB, uvicorn) can copy locks
+        in a held state and deadlock the child.
+        """
         spill_dir = self._spill_root / f"{_SPILL_DIR_PREFIX}{secrets.token_hex(4)}"
         spill_dir.mkdir()
-        parent_conn, child_conn = self._ctx.Pipe()
-        process = self._ctx.Process(
-            target=worker_main,
-            args=(child_conn, str(self._db_path), str(spill_dir), self._limits),
-            daemon=True,
-        )
-        worker = _Worker(process=process, conn=parent_conn, spill_dir=spill_dir)
+        parent_conn, child_conn = Pipe()
+        process: subprocess.Popen[bytes] | None = None
         try:
-            await asyncio.to_thread(process.start)
+            process = await asyncio.to_thread(_start_process, child_conn.fileno())
             child_conn.close()  # the parent keeps only its own end
+            config = {
+                "db_path": str(self._db_path),
+                "spill_dir": str(spill_dir),
+                "limits": dataclasses.asdict(self._limits),
+            }
             try:
+                parent_conn.send_bytes(json.dumps(config).encode())
                 raw = await self._receive(parent_conn, _WORKER_START_TIMEOUT_SECONDS, 64_000)
             except (EOFError, OSError) as error:
                 # The worker exited (or its pipe broke) before saying hello.
@@ -237,24 +274,17 @@ class QueryRunner:
             if not hello.get("ready"):
                 raise WorkerStartError(f"query worker failed to start: {hello.get('message')}")
         except BaseException:
-            # If start() failed, the child's end of the pipe was never handed
-            # over or closed; close it here, or retries under fd exhaustion
+            # If the process never started, the child's end of the pipe was
+            # never closed; close it here, or retries under fd exhaustion
             # (EMFILE) would leak another descriptor each time.
             child_conn.close()
-            await asyncio.to_thread(self._kill, worker)
+            await asyncio.to_thread(_stop, process, parent_conn, spill_dir)
             raise
-        return worker
+        return _Worker(process=process, conn=parent_conn, spill_dir=spill_dir)
 
     def _kill(self, worker: _Worker) -> None:
         """Blocking: run it in a thread."""
-        # pid is None if start() itself failed; there's no process to stop,
-        # and join() would raise, hiding the original error.
-        if worker.process.pid is not None:
-            if worker.process.is_alive():
-                worker.process.kill()
-            worker.process.join(timeout=5)
-        worker.conn.close()
-        shutil.rmtree(worker.spill_dir, ignore_errors=True)
+        _stop(worker.process, worker.conn, worker.spill_dir)
 
     def _retire(self, worker: _Worker) -> None:
         self._all.discard(worker)
@@ -285,6 +315,18 @@ class QueryRunner:
             self._all.add(replacement)
             self._idle.put_nowait(replacement)
             return
+
+
+def _stop(process: subprocess.Popen[bytes] | None, conn: Connection, spill_dir: Path) -> None:
+    """Blocking: kill the process (if it started), reap it and delete its spill directory."""
+    if process is not None:
+        process.kill()  # a no-op if it has already exited
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.error("query worker did not exit after SIGKILL (pid %s)", process.pid)
+    conn.close()
+    shutil.rmtree(spill_dir, ignore_errors=True)
 
 
 def _poll_and_read(conn: Connection, wait_seconds: float, maxlength: int) -> bytes | None:

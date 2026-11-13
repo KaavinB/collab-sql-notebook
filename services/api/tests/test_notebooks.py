@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 import uuid
 from collections.abc import Iterator
@@ -17,6 +18,7 @@ from notebook_api.db.models import CellRun, Notebook
 from notebook_api.main import create_app
 from notebook_api.notebooks.routes import RUNS_KEPT_PER_CELL
 from notebook_api.query.runner import QueryFailedError
+from notebook_api.query.validate import MAX_SQL_CHARS
 
 SNAPSHOT_MAX = 2_000
 
@@ -484,6 +486,42 @@ def test_a_too_long_query_says_so(client: TestClient) -> None:
     )
     assert response.status_code == 422
     assert "at most 20000 characters" in response.json()["detail"]["message"]
+
+
+def test_the_longest_allowed_query_fits_the_body_cap_in_the_worst_encoding(
+    client: TestClient,
+) -> None:
+    # The worst case for JSON size: every character outside the BMP, sent
+    # ASCII-escaped as a surrogate pair (12 bytes each). 20,000 of them must
+    # still reach validation (and run), not be refused by the 256 KiB body cap.
+    notebook_id = _create(client)["id"]
+    filler = "\U0001f600" * (MAX_SQL_CHARS - len("select ''"))
+    sql = f"select '{filler}'"
+    assert len(sql) == MAX_SQL_CHARS
+    body = json.dumps({"sql": sql}, ensure_ascii=True).encode()
+    assert 239_000 < len(body) <= 262_144
+    path = f"/notebooks/{notebook_id}/cells/c1/runs"
+    headers = {"Content-Type": "application/json"}
+    response = client.post(path, content=body, headers=headers)
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "ok"
+
+    # One more character is a validation error, still not a 413.
+    longer = json.dumps({"sql": sql + " "}, ensure_ascii=True).encode()
+    response = client.post(path, content=longer, headers=headers)
+    assert response.status_code == 422
+    assert "at most 20000 characters" in response.json()["detail"]["message"]
+
+
+def test_a_bad_path_parameter_names_the_rule_not_the_value(client: TestClient) -> None:
+    response = client.get("/notebooks/PRIVATE-not-a-uuid")
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": {
+            "kind": "invalid",
+            "message": "Invalid request: path.notebook_id must be a UUID.",
+        }
+    }
 
 
 def test_malformed_json_is_reported_without_echoing_the_body(client: TestClient) -> None:

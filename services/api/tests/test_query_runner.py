@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import multiprocessing
 import sys
 import threading
 from collections.abc import AsyncIterator
@@ -14,7 +15,6 @@ from notebook_api.query import runner as runner_module
 from notebook_api.query.engine import EngineLimits
 from notebook_api.query.runner import QueryFailedError, QueryRunner, WorkerStartError
 from notebook_api.query.validate import PreparedQuery, QueryRejectedError, prepare_query
-from tests.fixtures import exit_immediately, report_worker_environment
 
 pytestmark = pytest.mark.anyio
 
@@ -131,7 +131,7 @@ async def test_parent_kills_a_worker_that_does_not_answer(
     monkeypatch.undo()
     await _wait_for_pool_size(runner, 2)
     (worker,) = killed
-    assert not worker.process.is_alive()
+    assert worker.process.poll() is not None  # exited and reaped
     assert not worker.spill_dir.exists()
     assert (await runner.run("select 2 as x"))["rows"] == [[2]]
 
@@ -159,7 +159,7 @@ async def test_an_idle_worker_death_is_reported_and_replaced(
     try:
         (worker,) = pool._all
         worker.process.kill()
-        await asyncio.to_thread(worker.process.join, 5)
+        await asyncio.to_thread(worker.process.wait, 5)
         with pytest.raises(QueryFailedError) as info:
             await pool.run("select 1 as x")
         assert info.value.kind == "crashed"
@@ -170,23 +170,51 @@ async def test_an_idle_worker_death_is_reported_and_replaced(
         await pool.close()
 
 
-async def test_workers_discard_inherited_application_credentials(
+# Runs the real worker after recording the environment it was started with.
+# os.environ in a fresh interpreter is exactly the environment block passed
+# to exec, which is also what /proc/<pid>/environ shows on Linux.
+_RECORD_ENV_THEN_WORK = """
+import json, os, sys
+from multiprocessing.connection import Connection
+from notebook_api.query.worker import worker_main
+with open(sys.argv[2], "w") as out:
+    json.dump(sorted(os.environ), out)
+worker_main(Connection(int(sys.argv[1])))
+"""
+
+
+async def test_workers_start_with_a_clean_environment(
     query_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", "private-database-credential")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "private-api-credential")
-    monkeypatch.setattr(runner_module, "worker_main", report_worker_environment)
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    record = tmp_path / "environment.json"
+    monkeypatch.setattr(
+        runner_module,
+        "worker_command",
+        lambda fd: [sys.executable, "-I", "-c", _RECORD_ENV_THEN_WORK, str(fd), str(record)],
+    )
     pool = _runner(query_db, tmp_path / "spill", workers=1)
     await pool.start()
     try:
-        (worker,) = pool._all
-        names = json.loads((worker.spill_dir / "environment.json").read_text())
+        names = json.loads(record.read_text())
         assert "DATABASE_URL" not in names
         assert "ANTHROPIC_API_KEY" not in names
-        assert set(names) <= {"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TMP", "TEMP"}
+        assert "LANG" in names  # allowed variables do get through
+        # macOS itself sets __CF_USER_TEXT_ENCODING (a text-encoding hint) in
+        # every new process; it isn't inherited from us.
+        added_by_os = {"__CF_USER_TEXT_ENCODING"} if sys.platform == "darwin" else set()
+        assert set(names) <= runner_module.WORKER_ENV_NAMES | added_by_os
         assert (await pool.run("select 1 as x"))["rows"] == [[1]]
     finally:
         await pool.close()
+
+
+def test_the_real_worker_command_runs_isolated() -> None:
+    command = runner_module.worker_command(7)
+    assert command[:4] == [sys.executable, "-I", "-m", "notebook_api.query.worker"]
+    assert command[4] == "7"
 
 
 async def test_a_cancelled_request_never_leaks_its_result_to_the_next_one(
@@ -254,7 +282,7 @@ async def test_start_fails_for_a_missing_database(tmp_path: Path) -> None:
 async def test_start_reports_a_worker_that_exits_during_startup(
     query_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(runner_module, "worker_main", exit_immediately)
+    monkeypatch.setattr(runner_module, "worker_command", lambda fd: [sys.executable, "-c", "pass"])
     pool = _runner(query_db, tmp_path / "spill")
     with pytest.raises(WorkerStartError, match="exited during startup"):
         await pool.start()
@@ -266,27 +294,20 @@ async def test_start_reports_the_real_error_when_a_process_cannot_start(
     query_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pool = _runner(query_db, tmp_path / "spill")
-    real_process = pool._ctx.Process
 
-    def unstartable(*args: Any, **kwargs: Any) -> Any:
-        process = real_process(*args, **kwargs)
-
-        def start() -> None:
-            raise OSError("too many open files")
-
-        process.start = start  # type: ignore[method-assign]
-        return process
+    def unstartable(fd: int) -> Any:
+        raise OSError("too many open files")
 
     pipes: list[Any] = []
-    real_pipe = pool._ctx.Pipe
+    real_pipe = multiprocessing.Pipe
 
     def recording_pipe(*args: Any, **kwargs: Any) -> Any:
         ends = real_pipe(*args, **kwargs)
         pipes.extend(ends)
         return ends
 
-    monkeypatch.setattr(pool._ctx, "Process", unstartable)
-    monkeypatch.setattr(pool._ctx, "Pipe", recording_pipe)
+    monkeypatch.setattr(runner_module, "_start_process", unstartable)
+    monkeypatch.setattr(runner_module, "Pipe", recording_pipe)
     with pytest.raises(OSError, match="too many open files"):
         await pool.start()
     assert list((tmp_path / "spill").glob("worker-*")) == []
