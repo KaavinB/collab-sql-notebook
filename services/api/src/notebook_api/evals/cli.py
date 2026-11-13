@@ -8,6 +8,7 @@ From the repo root:
     pnpm eval run --dry-run --limit 5       # the whole pipeline with a fake model, no API
     pnpm eval run --limit 10 --models claude-haiku-5-5,claude-sonnet-5-5,claude-opus-5-5 \
         --allow-spend                       # a measured pilot (calls the paid API)
+    pnpm eval report --run-id <id>          # rebuild a run's report from its answers (free)
 
 Results go to <data-dir>/eval-results/<run-id>/: run.json (the exact
 configuration, code version and question IDs), gold.jsonl (the gold results
@@ -82,8 +83,9 @@ from notebook_api.evals.taxi import (
 )
 
 # 200 of BIRD dev's 1534 questions: enough that a 95% interval on accuracy is
-# at most about ±7 percentage points wide (the Wilson half-width at 50%,
-# n=200, is 1.96·sqrt(0.25/200) ≈ 0.069), while keeping a three-model run
+# at most about ±7 percentage points wide (the normal-approximation half-width
+# at 50%, n=200, is 1.96·sqrt(0.25/200) ≈ 0.069; the report's Wilson interval
+# is about as wide there), while keeping a three-model run
 # small enough to approve as one budget. The size is a flag; the report
 # shows n and the interval for whatever size is used.
 DEFAULT_SUBSET_SIZE = 200
@@ -165,6 +167,8 @@ def main(argv: Sequence[str] | None = None, deps: Dependencies | None = None) ->
             return _check_gold(args, data_dir, deps)
         if args.command == "check-taxi":
             return _check_taxi(args, deps)
+        if args.command == "report":
+            return _rebuild_report(args.run_id, data_dir, deps)
         return asyncio.run(_run(args, data_dir, deps))
     except (
         EvalSetupError,
@@ -198,6 +202,13 @@ def _parser() -> argparse.ArgumentParser:
     gold.add_argument("--out", type=Path, default=None, help="Where to write the JSON results.")
     check = commands.add_parser("check-taxi", help="Validate the taxi questions file.")
     _taxi_args(check)
+
+    report = commands.add_parser(
+        "report",
+        help="Rebuild a run's summary.json and report.md from its stored answers "
+        "(no model calls, nothing spent).",
+    )
+    report.add_argument("--run-id", type=_run_id, required=True)
 
     run = commands.add_parser("run", help="Run the eval.")
     run.add_argument("--suite", choices=(*SUITES, "all"), default="all")
@@ -643,30 +654,81 @@ def _start_or_resume(run_dir: Path, run: dict[str, Any]) -> dict[str, Any]:
     return run
 
 
+def _rebuild_report(run_id: str, data_dir: Path, deps: Dependencies) -> int:
+    """Re-score a run's stored answers with this code's report, asking no model.
+
+    Resuming refuses a run started by other code (its answers can't be mixed
+    with new ones), but rebuilding only re-reads them, so it works on any run:
+    an old report can be corrected when the way it's summarized changes. The
+    report says which code rebuilt it.
+    """
+    run_dir = data_dir / "eval-results" / run_id
+    config_path = run_dir / "run.json"
+    if not config_path.is_file():
+        raise EvalSetupError(f"no run {run_id} in {run_dir.parent}")
+    _load_ids_from(config_path)  # size-checked, and must list its question IDs
+    run = json.loads(config_path.read_text(encoding="utf-8"))
+    # The suites' selection text and any "not measured" message were written
+    # by the run itself; they don't depend on how answers are summarized.
+    previous: dict[str, Any] = {}
+    summary_path = run_dir / "summary.json"
+    if summary_path.is_file():
+        previous = json.loads(summary_path.read_text(encoding="utf-8")).get("suites", {})
+    records = load_records(run_dir / "results.jsonl")
+    summary = _summary_head(run)
+    for name in run["suites"]:
+        earlier = previous.get(name, {})
+        if earlier.get("status", "measured") != "measured":
+            summary["suites"][name] = {
+                "status": earlier["status"],
+                "message": earlier.get("message", ""),
+            }
+            continue
+        ids = list(run["ids"].get(name, []))
+        selection = str(earlier.get("selection", ""))
+        summary["suites"][name] = _measured_suite(run, name, ids, selection, records)
+    summary["rebuilt_by"] = deps.provenance()
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (run_dir / "report.md").write_text(render_markdown(summary))
+    _print_totals(summary, deps.out)
+    deps.out(f"report: {run_dir / 'report.md'}")
+    return 0
+
+
 def build_summary(
     run: dict[str, Any], suites: dict[str, _Suite], records: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    out: dict[str, Any] = {
-        "run": run,
-        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "suites": {},
-    }
+    out = _summary_head(run)
     for name, suite in suites.items():
         if suite.status != "measured":
             out["suites"][name] = {"status": suite.status, "message": suite.message}
             continue
         ids = [q.id for q in suite.questions]
-        out["suites"][name] = {
-            "status": "measured",
-            "selected": len(ids),
-            "selection": suite.selection,
-            "ids": ids,
-            "models": {
-                model: summarize_suite(records, suite=name, model=model, selected_ids=ids)
-                for model in run["models"]
-            },
-        }
+        out["suites"][name] = _measured_suite(run, name, ids, suite.selection, records)
     return out
+
+
+def _summary_head(run: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run": run,
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "suites": {},
+    }
+
+
+def _measured_suite(
+    run: dict[str, Any], name: str, ids: list[str], selection: str, records: list[dict[str, Any]]
+) -> dict[str, Any]:
+    return {
+        "status": "measured",
+        "selected": len(ids),
+        "selection": selection,
+        "ids": ids,
+        "models": {
+            model: summarize_suite(records, suite=name, model=model, selected_ids=ids)
+            for model in run["models"]
+        },
+    }
 
 
 def _gold_line(index: int, total: int, question: EvalQuestion, outcome: ExecOutcome) -> str:
@@ -697,7 +759,12 @@ def _print_totals(summary: dict[str, Any], out: Callable[[str], None]) -> None:
         for model, stats in suite["models"].items():
             tokens = stats["tokens"]
             cost = stats["cost_usd_list_prices"]
-            cost_text = "not computed (no list price)" if cost is None else f"${cost:.4f}"
+            if not tokens["cache_breakdown_recorded"]:
+                cost_text = "not computable (cache writes and reads weren't recorded)"
+            elif cost is None:
+                cost_text = "not computed (no list price)"
+            else:
+                cost_text = f"${cost:.4f}"
             acc = stats["accuracy"]
             unfinished = f"; {stats['incomplete']} unfinished" if stats["incomplete"] else ""
             out(

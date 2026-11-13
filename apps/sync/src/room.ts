@@ -408,9 +408,10 @@ export class Room {
    * A new request. It replaces whatever the cell showed except a suggestion
    * still waiting for a decision: dropping that from the document would
    * leave its row pending forever, with nobody able to see or decide it.
-   * (The API refuses a new request while one is pending, so this only
-   * happens if that check is bypassed; the suggestion's resolution or
-   * reconciliation clears it as usual.)
+   * (The API supersedes a pending suggestion when a new request for its
+   * cell starts and sends its resolution first, so this only happens if
+   * that resolution is late or lost; it, or reconciliation, clears the
+   * suggestion as usual.)
    */
   aiStarted(cellId: string, state: AiState & { status: "thinking" }): void {
     const written = this.writeAi(cellId, state, (current) => current?.status !== "suggestion");

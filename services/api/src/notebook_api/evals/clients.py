@@ -33,7 +33,14 @@ class DryRunModelClient:
 
     async def complete(self, *, system: str, user: str, max_tokens: int) -> ModelReply:
         self.calls += 1
-        return ModelReply(text=self.REPLY, input_tokens=0, output_tokens=0, stop_reason="end_turn")
+        return ModelReply(
+            text=self.REPLY,
+            input_tokens=0,
+            output_tokens=0,
+            stop_reason="end_turn",
+            cache_write_tokens=0,
+            cache_read_tokens=0,
+        )
 
 
 def dry_run_client_factory(model: str, effort: str) -> ModelClient:

@@ -471,6 +471,9 @@ def _replies_json(recorder: RecordingClient) -> list[dict[str, Any]]:
         {
             "input_tokens": reply.input_tokens,
             "output_tokens": reply.output_tokens,
+            # None when the client doesn't report them (the dry-run fake).
+            "cache_write_tokens": getattr(reply, "cache_write_tokens", None),
+            "cache_read_tokens": getattr(reply, "cache_read_tokens", None),
             "stop_reason": reply.stop_reason,
             "model": getattr(reply, "model", None),
         }

@@ -112,6 +112,8 @@ async def test_a_request_has_the_model_effort_and_a_cached_system_prompt() -> No
     assert reply.stop_reason == "end_turn"
     # Input counts uncached, cache-written and cache-read tokens.
     assert (reply.input_tokens, reply.output_tokens) == (1010, 5)
+    # ...and reports the cache parts separately, since they're priced differently.
+    assert (reply.cache_write_tokens, reply.cache_read_tokens) == (100, 900)
     assert reply.model == "claude-haiku-5-5"
 
 
@@ -169,7 +171,7 @@ async def test_a_fallback_reports_the_model_that_answered_and_every_attempts_tok
                     "model": "claude-opus-5-5",
                     "input_tokens": 50,
                     "output_tokens": 0,
-                    "cache_creation_input_tokens": 0,
+                    "cache_creation_input_tokens": 30,
                     "cache_read_input_tokens": 0,
                 },
                 {
@@ -178,7 +180,7 @@ async def test_a_fallback_reports_the_model_that_answered_and_every_attempts_tok
                     "input_tokens": 60,
                     "output_tokens": 20,
                     "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
+                    "cache_read_input_tokens": 40,
                 },
             ],
         },
@@ -189,7 +191,9 @@ async def test_a_fallback_reports_the_model_that_answered_and_every_attempts_tok
     )
     assert reply.model == "claude-opus-4-8"
     assert reply.text == "```sql\nSELECT 2\n```"
-    assert (reply.input_tokens, reply.output_tokens) == (110, 20)
+    # Every attempt's tokens, cache parts included: (50 + 30) + (60 + 40).
+    assert (reply.input_tokens, reply.output_tokens) == (180, 20)
+    assert (reply.cache_write_tokens, reply.cache_read_tokens) == (30, 40)
 
 
 async def test_a_refusal_has_no_text_even_with_partial_content() -> None:

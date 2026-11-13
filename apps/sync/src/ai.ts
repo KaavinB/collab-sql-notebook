@@ -12,8 +12,10 @@
  *   { status: "failed", requestId, message }
  *   null (no AI activity, or the suggestion was accepted or rejected)
  *
- * People accept a suggestion by replacing the cell's text themselves (their
- * own edit, which their undo can revert), then telling the API.
+ * People accept a suggestion by telling the API first; only once it has
+ * recorded the decision does the accepting person replace the cell's text
+ * (their own edit, which their undo can revert). Deciding first means two
+ * people accepting at once can't both apply it.
  *
  * While some cell's AI state is thinking or suggestion, the room also shows
  * the AI as present: one awareness entry the server owns, under a client ID

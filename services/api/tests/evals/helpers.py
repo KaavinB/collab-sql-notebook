@@ -149,9 +149,22 @@ class FakeModelClient:
                 if index < len(reasons):
                     stop = reasons[index]
         if stop == "refusal":
-            return ModelReply(text="", input_tokens=900, output_tokens=0, stop_reason="refusal")
+            return ModelReply(
+                text="",
+                input_tokens=900,
+                output_tokens=0,
+                stop_reason="refusal",
+                cache_write_tokens=0,
+                cache_read_tokens=0,
+            )
+        # 1,000 input tokens: 600 uncached, 300 written to the cache, 100 read from it.
         return ModelReply(
-            text="```sql\n...\n```", input_tokens=1000, output_tokens=50, stop_reason=stop
+            text="```sql\n...\n```",
+            input_tokens=1000,
+            output_tokens=50,
+            stop_reason=stop,
+            cache_write_tokens=300,
+            cache_read_tokens=100,
         )
 
 

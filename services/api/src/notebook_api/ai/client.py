@@ -167,35 +167,37 @@ def _reply(message: Any) -> ModelReply:
         # Thinking blocks (and a fallback marker block) come before the
         # answer; only text blocks are the answer.
         text = "".join(block.text for block in message.content if block.type == "text")
-    input_tokens, output_tokens = _tokens(message.usage)
+    input_tokens, output_tokens, cache_write, cache_read = _tokens(message.usage)
     return ModelReply(
         text=text,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         stop_reason=stop_reason,
         model=str(message.model),
+        cache_write_tokens=cache_write,
+        cache_read_tokens=cache_read,
     )
 
 
-def _tokens(usage: Any) -> tuple[int, int]:
-    """Input and output tokens for the whole call.
+def _tokens(usage: Any) -> tuple[int, int, int, int]:
+    """Input, output, cache-write and cache-read tokens for the whole call.
 
     Input counts every token the model read: uncached, written to the cache
-    and read from it (the API reports them separately; the sum is what the
-    prompt cost in tokens, not in money). After a refusal fallback the
-    top-level usage covers only the attempt that answered, so the
-    per-attempt `iterations` are summed instead when present.
+    and read from it (the API reports the three separately, and they're
+    priced differently, so the cache parts are returned too). After a refusal
+    fallback the top-level usage covers only the attempt that answered, so
+    the per-attempt `iterations` are summed instead when present.
     """
     parts = getattr(usage, "iterations", None) or [usage]
-    input_tokens = output_tokens = 0
+    input_tokens = output_tokens = cache_write = cache_read = 0
     for part in parts:
-        input_tokens += (
-            (getattr(part, "input_tokens", 0) or 0)
-            + (getattr(part, "cache_creation_input_tokens", 0) or 0)
-            + (getattr(part, "cache_read_input_tokens", 0) or 0)
-        )
+        written = getattr(part, "cache_creation_input_tokens", 0) or 0
+        read = getattr(part, "cache_read_input_tokens", 0) or 0
+        input_tokens += (getattr(part, "input_tokens", 0) or 0) + written + read
+        cache_write += written
+        cache_read += read
         output_tokens += getattr(part, "output_tokens", 0) or 0
-    return input_tokens, output_tokens
+    return input_tokens, output_tokens, cache_write, cache_read
 
 
 # --- the deterministic fake (AI_FAKE_MODEL=true) ----------------------------------
@@ -247,4 +249,6 @@ class FakeModelClient:
             output_tokens=len(text) // 4,
             stop_reason=stop_reason,
             model=FAKE_MODEL_NAME,
+            cache_write_tokens=0,
+            cache_read_tokens=0,
         )

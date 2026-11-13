@@ -387,3 +387,44 @@ def test_check_gold_times_every_gold_query_and_saves_them(h: Harness) -> None:
     assert by_id["3"]["row_count"] == 4
     assert any(line.startswith("6 gold queries, run one at a time") for line in h.lines)
     assert any(line.startswith("slowest: 6 ") for line in h.lines)
+
+
+def test_report_rebuilds_a_run_from_its_answers_without_asking_again(h: Harness) -> None:
+    assert h.run("--allow-spend", "--models", "claude-haiku-5-5", "--run-id", "r") == 0
+    run_dir = h.run_dir("r")
+    original = json.loads((run_dir / "summary.json").read_text())
+    calls = len(h.generate.calls)
+
+    # Other code (a resume would refuse it) rebuilds the same summary.
+    h.versions["code_sha256"] = "b" * 64
+    assert h.main("report", "--run-id", "r") == 0
+    assert len(h.generate.calls) == calls and len(h.factory_calls) == 1
+    rebuilt = json.loads((run_dir / "summary.json").read_text())
+    assert rebuilt["rebuilt_by"]["code_sha256"] == "b" * 64
+    for key in ("generated_at", "rebuilt_by"):
+        rebuilt.pop(key, None)
+        original.pop(key, None)
+    assert rebuilt == original  # including the taxi suite's "not measured" message
+    report = (run_dir / "report.md").read_text()
+    assert "rebuilt from the run's stored answers" in report and "bbbbbbbbbbbb" in report
+
+    # Answers recorded before cache tokens were: the rebuilt cost says it can't be computed.
+    lines = (run_dir / "results.jsonl").read_text().splitlines()
+    stripped = []
+    for line in lines:
+        record = json.loads(line)
+        for reply in record.get("replies", []):
+            reply.pop("cache_write_tokens", None)
+            reply.pop("cache_read_tokens", None)
+        stripped.append(json.dumps(record))
+    (run_dir / "results.jsonl").write_text("\n".join(stripped) + "\n")
+    h.lines.clear()
+    assert h.main("report", "--run-id", "r") == 0
+    report = (run_dir / "report.md").read_text()
+    assert "not computable for this run (cache writes and reads weren't recorded)" in report
+    assert any("not computable (cache writes and reads weren't recorded)" in x for x in h.lines)
+
+
+def test_report_needs_an_existing_run(h: Harness, capsys: pytest.CaptureFixture[str]) -> None:
+    assert h.main("report", "--run-id", "nope") == 1
+    assert "no run nope" in capsys.readouterr().err

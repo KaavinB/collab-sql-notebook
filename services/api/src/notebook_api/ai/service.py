@@ -49,6 +49,7 @@ from notebook_api.ai.pipeline import (
     Attempt,
     GenerationResult,
     ModelClient,
+    ModelReply,
     SchemaContext,
     Validator,
     explain_sql,
@@ -117,7 +118,7 @@ class Failed:
 
 @dataclass(frozen=True)
 class Busy:
-    """The cell already has an AI request in flight, or a suggestion waiting for a decision."""
+    """The cell already has an AI request in flight."""
 
     message: str
 
@@ -290,14 +291,18 @@ class AiService:
                 settled = True
                 return claimed
             started = time.monotonic()
+            recorder = _RecordingClient(self.client)
+            progress: list[Attempt] = []
             try:
                 async with asyncio.timeout(self._deadline):
-                    result: GenerationResult | Failed = await self._generate(task)
+                    result: GenerationResult | Failed = await self._generate(
+                        task, recorder, progress
+                    )
                 attempts = result.attempts if isinstance(result, GenerationResult) else []
             except AssistantUnavailableError as error:
                 result, attempts = Failed(error.message), error.attempts
             except TimeoutError:
-                result, attempts = Failed(TOO_SLOW), []
+                result, attempts = Failed(TOO_SLOW), recorder.attempts_so_far(progress)
             latency_ms = round((time.monotonic() - started) * 1000)
             outcome = await self._finish(
                 request_id, notebook_id, cell_id, task, result, attempts, latency_ms
@@ -398,14 +403,17 @@ class AiService:
             await session.commit()
             return None
 
-    async def _generate(self, task: AiTask) -> GenerationResult:
+    async def _generate(
+        self, task: AiTask, client: ModelClient, progress: list[Attempt]
+    ) -> GenerationResult:
         schema = await self._schema.get()
         if task.kind == "generate":
             return await generate_sql(
                 question=task.prompt or "",
                 schema=schema,
                 validator=self._validator,
-                client=self.client,
+                client=client,
+                progress=progress,
             )
         if task.kind == "fix":
             return await fix_sql(
@@ -413,9 +421,12 @@ class AiService:
                 error=task.error or "",
                 schema=schema,
                 validator=self._validator,
-                client=self.client,
+                client=client,
+                progress=progress,
             )
-        return await explain_sql(sql=task.sql or "", schema=schema, client=self.client)
+        return await explain_sql(
+            sql=task.sql or "", schema=schema, client=client, progress=progress
+        )
 
     async def _finish(
         self,
@@ -507,6 +518,43 @@ def succeeded(kind: Kind, result: GenerationResult) -> bool:
     if kind == "explain":
         return bool(result.attempts) and result.attempts[-1].error is None
     return result.sql is not None
+
+
+class _RecordingClient:
+    """Passes calls through to the model client and keeps every reply.
+
+    With the pipeline's `progress` list, this is what's left to log when the
+    request's deadline stops it part-way.
+    """
+
+    def __init__(self, client: ModelClient) -> None:
+        self._client = client
+        self._replies: list[ModelReply] = []
+
+    async def complete(self, *, system: str, user: str, max_tokens: int) -> ModelReply:
+        reply = await self._client.complete(system=system, user=user, max_tokens=max_tokens)
+        self._replies.append(reply)
+        return reply
+
+    def attempts_so_far(self, completed: list[Attempt]) -> list[Attempt]:
+        """The attempts the pipeline completed, plus one for a reply it was still checking.
+
+        Each attempt is one reply, in order, so replies past the completed
+        attempts arrived (and were paid for) but the deadline stopped their
+        validation: they're logged as TOO_SLOW with their tokens. A call
+        still waiting on the model isn't logged; its usage never arrived.
+        """
+        unfinished = [
+            Attempt(
+                sql=None,
+                error=TOO_SLOW,
+                input_tokens=reply.input_tokens,
+                output_tokens=reply.output_tokens,
+                model=reply.model,
+            )
+            for reply in self._replies[len(completed) :]
+        ]
+        return [*completed, *unfinished]
 
 
 def _attempt_log(attempt: Attempt) -> dict[str, Any]:

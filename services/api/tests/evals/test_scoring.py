@@ -63,10 +63,24 @@ def test_proportion_describes_n_and_interval() -> None:
 
 def test_list_price_cost() -> None:
     million = 1_000_000
-    assert request_cost("claude-haiku-5-5", million // 10, million // 10) == pytest.approx(0.06)
-    assert request_cost("claude-sonnet-5-5", million, million) == pytest.approx(12.0)
-    assert request_cost("claude-opus-5-5", million, million) == pytest.approx(24.0)
-    assert request_cost("some-other-model", 10, 10) is None
+    assert request_cost("claude-haiku-5-5", million // 10, million // 10, 0, 0) == pytest.approx(
+        0.06
+    )
+    assert request_cost("claude-sonnet-5-5", million, million, 0, 0) == pytest.approx(12.0)
+    assert request_cost("claude-opus-5-5", million, million, 0, 0) == pytest.approx(24.0)
+    assert request_cost("some-other-model", 10, 10, 0, 0) is None
+
+
+def test_cache_writes_and_reads_are_priced_at_their_own_rates() -> None:
+    # A million input tokens: 400k uncached, 400k written to the cache (1.25x),
+    # 200k read from it (0.05x on Opus 5.5 and Sonnet 5.5, 0.1x on Haiku 5.5).
+    million = 1_000_000
+    opus = request_cost("claude-opus-5-5", million, 0, 400_000, 200_000)
+    assert opus == pytest.approx((400_000 * 4 + 400_000 * 4 * 1.25 + 200_000 * 4 * 0.05) / 1e6)
+    sonnet = request_cost("claude-sonnet-5-5", million, 0, 0, million)
+    assert sonnet == pytest.approx(million * 2 * 0.05 / 1e6)  # $0.10 per million cache reads
+    haiku = request_cost("claude-haiku-5-5", million // 10, 0, 0, million // 10)
+    assert haiku == pytest.approx(100_000 * 0.10 * 0.1 / 1e6)
 
 
 def test_haiku_long_prompts_pay_the_higher_rate() -> None:
@@ -74,9 +88,9 @@ def test_haiku_long_prompts_pay_the_higher_rate() -> None:
     assert is_long_prompt("claude-haiku-5-5", 100_001)
     assert not is_long_prompt("claude-opus-5-5", 500_000)
     assert not is_long_prompt("unknown", 500_000)
-    assert request_cost("claude-haiku-5-5", 100_000, 1_000) == pytest.approx(
+    assert request_cost("claude-haiku-5-5", 100_000, 1_000, 0, 0) == pytest.approx(
         (100_000 * 0.10 + 1_000 * 0.50) / 1e6
     )
-    assert request_cost("claude-haiku-5-5", 200_000, 1_000) == pytest.approx(
+    assert request_cost("claude-haiku-5-5", 200_000, 1_000, 0, 0) == pytest.approx(
         (200_000 * 0.50 + 1_000 * 2.50) / 1e6
     )

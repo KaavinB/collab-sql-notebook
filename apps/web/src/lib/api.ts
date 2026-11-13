@@ -355,8 +355,12 @@ export function createApiClient(options: ApiClientOptions = {}) {
      * Asks the AI assistant to write, fix or explain a cell's SQL. Resolves
      * with the stored suggestion once it's done; meanwhile, and afterwards,
      * every member sees the request and its suggestion through the document.
-     * Fails with kind "busy" (409) if the cell already has a request in
-     * flight, "rate_limited" (429), or "unavailable" (503, no AI configured).
+     * Fails with kind "busy" (409 if the cell already has a request in
+     * flight, 503 if the assistant is at capacity), "rate_limited" (429: too
+     * many recent requests, or two already in flight), "unavailable" (503,
+     * no AI configured), "ai_failed" (502: the assistant couldn't answer;
+     * everyone sees the failure in the document) or "not_found" (404).
+     * A new request replaces the cell's suggestion still awaiting a decision.
      * Aborting only stops waiting: the server finishes the request anyway.
      */
     async askAi(

@@ -41,6 +41,11 @@ class ModelReply:
     # The model that produced the reply, when the client knows it. It differs
     # from the requested model when a refusal was retried on a fallback model.
     model: str | None = None
+    # How many of `input_tokens` were written to / read from the prompt cache
+    # (they're priced differently; `input_tokens` is the total read). None
+    # when the client doesn't know (fakes, older records).
+    cache_write_tokens: int | None = None
+    cache_read_tokens: int | None = None
 
 
 class ModelClient(Protocol):
@@ -114,11 +119,14 @@ async def generate_sql(
     max_repairs: int = 2,
     evidence: str | None = None,
     max_output_tokens: int = MAX_OUTPUT_TOKENS,
+    progress: list[Attempt] | None = None,
 ) -> GenerationResult:
     """Write a query answering `question`, validated and repaired up to `max_repairs` times.
 
     `max_output_tokens` is each model call's output cap, adaptive thinking
     included; a reply that reaches it is recorded with the error CUT_OFF.
+    `progress`, if given, gets each attempt as soon as it's complete, so a
+    caller that stops the work part-way (a deadline) still knows what was tried.
     """
     return await _write_query(
         task=prompts.generate_task(question, evidence),
@@ -127,6 +135,7 @@ async def generate_sql(
         client=client,
         max_repairs=max_repairs,
         max_output_tokens=max_output_tokens,
+        progress=progress,
     )
 
 
@@ -139,8 +148,12 @@ async def fix_sql(
     client: ModelClient,
     max_repairs: int = 2,
     max_output_tokens: int = MAX_OUTPUT_TOKENS,
+    progress: list[Attempt] | None = None,
 ) -> GenerationResult:
-    """Correct `sql`, which failed with `error`; the correction is validated and repaired."""
+    """Correct `sql`, which failed with `error`; the correction is validated and repaired.
+
+    `progress` is as for generate_sql.
+    """
     return await _write_query(
         task=prompts.fix_task(sql, error),
         schema=schema,
@@ -148,6 +161,7 @@ async def fix_sql(
         client=client,
         max_repairs=max_repairs,
         max_output_tokens=max_output_tokens,
+        progress=progress,
     )
 
 
@@ -157,12 +171,13 @@ async def explain_sql(
     schema: SchemaContext,
     client: ModelClient,
     max_output_tokens: int = MAX_OUTPUT_TOKENS,
+    progress: list[Attempt] | None = None,
 ) -> GenerationResult:
     """Explain `sql` in plain language: one model call, nothing to validate.
 
     The result has no SQL (and so `valid` is False). The single attempt's
     `error` is None when an explanation came back; otherwise it says why
-    not, and so does `explanation`.
+    not, and so does `explanation`. `progress` is as for generate_sql.
     """
     system = prompts.system_prompt(schema)
     reply = await _complete(client, system, prompts.explain_task(sql), [], max_output_tokens)
@@ -183,6 +198,8 @@ async def explain_sql(
         output_tokens=reply.output_tokens,
         model=reply.model,
     )
+    if progress is not None:
+        progress.append(attempt)
     return GenerationResult(
         sql=None, valid=False, explanation=text if error is None else error, attempts=[attempt]
     )
@@ -196,6 +213,7 @@ async def _write_query(
     client: ModelClient,
     max_repairs: int,
     max_output_tokens: int,
+    progress: list[Attempt] | None,
 ) -> GenerationResult:
     """Ask for a query, validate it, and on failure feed the error back, up to max_repairs times.
 
@@ -210,7 +228,7 @@ async def _write_query(
     if max_output_tokens < 1:
         raise ValueError("max_output_tokens must be at least 1")
     system = prompts.system_prompt(schema)
-    attempts: list[Attempt] = []
+    attempts: list[Attempt] = progress if progress is not None else []
     latest: tuple[str, str, str] | None = None  # (sql, explanation, error) of the newest query
     user = task
     refused = False

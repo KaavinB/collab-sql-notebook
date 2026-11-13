@@ -706,6 +706,69 @@ async def test_a_request_past_its_deadline_fails(
     await service.close()
 
 
+class _AnswersOnceThenHangs:
+    """Answers the first call with SQL that fails validation; the repair call never returns."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, *, system: str, user: str, max_tokens: int) -> ModelReply:
+        self.calls += 1
+        if self.calls == 1:
+            return sql_reply("SELECT nope FROM t")
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.anyio
+async def test_a_request_past_its_deadline_logs_the_replies_it_already_paid_for(
+    service_parts: tuple[Any, str, uuid.UUID], clean_db: str
+) -> None:
+    sessions, notebook_id, user_id = service_parts
+    client = _AnswersOnceThenHangs()
+    validator = TableValidator(errors={"nope": "Unknown column nope"})
+    service = AiService(sessions, client, "m", _Schema(), validator, deadline_seconds=0.2)
+    outcome = await service.request(
+        uuid.UUID(notebook_id), "c1", user_id, "Ada", AiTask(kind="generate", prompt="q")
+    )
+    assert not isinstance(outcome, Done)
+    assert client.calls == 2  # the deadline hit during the repair call
+    [(status, attempts, input_tokens, output_tokens)] = _rows(
+        clean_db, "SELECT status, attempts, input_tokens, output_tokens FROM ai_requests"
+    )
+    assert status == "failed"
+    # The completed attempt as it was: its SQL and why it failed validation.
+    [attempt] = attempts
+    assert attempt["sql"] == "SELECT nope FROM t"
+    assert attempt["error"] == "Unknown column nope"
+    assert attempt["model"] == "scripted"
+    assert (input_tokens, output_tokens) == (100, 10)
+    await service.close()
+
+
+class _HangingValidator:
+    async def validate(self, sql: str) -> str | None:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.anyio
+async def test_a_reply_whose_validation_the_deadline_stopped_is_still_logged(
+    service_parts: tuple[Any, str, uuid.UUID], clean_db: str
+) -> None:
+    sessions, notebook_id, user_id = service_parts
+    client = ScriptedClient([sql_reply("SELECT 1")])
+    service = AiService(sessions, client, "m", _Schema(), _HangingValidator(), deadline_seconds=0.2)
+    await service.request(
+        uuid.UUID(notebook_id), "c1", user_id, "Ada", AiTask(kind="generate", prompt="q")
+    )
+    [(attempts, input_tokens)] = _rows(clean_db, "SELECT attempts, input_tokens FROM ai_requests")
+    [attempt] = attempts
+    assert attempt["sql"] is None and "too long" in attempt["error"]
+    assert input_tokens == 100  # the reply arrived, so it was paid for
+    await service.close()
+
+
 @pytest.mark.anyio
 async def test_a_cancellation_right_after_the_claim_still_fails_the_row(
     service_parts: tuple[Any, str, uuid.UUID], clean_db: str, monkeypatch: pytest.MonkeyPatch

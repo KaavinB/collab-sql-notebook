@@ -138,14 +138,21 @@ def test_scores_with_and_without_repair_from_one_run(dataset: BirdDataset, tmp_p
         "timeout": 0,
         "too_many_rows": 0,
     }
-    # 5 replies: 1 + 2 + 1 at 1000 in / 50 out, and the refusal at 900 / 0.
+    # 5 replies: 1 + 2 + 1 at 1000 in / 50 out (300 of the 1000 written to the
+    # cache and 100 read from it), and the refusal at 900 / 0, all uncached.
     assert s["tokens"] == {
         "input": 4900,
+        "cache_write": 1200,
+        "cache_read": 400,
+        "cache_breakdown_recorded": True,
         "output": 200,
         "replies": 5,
         "prompts_over_long_context_threshold": 0,
     }
-    assert s["cost_usd_list_prices"] == pytest.approx((4900 * 0.10 + 200 * 0.50) / 1e6)
+    # Haiku 5.5: $0.10 uncached, x1.25 for cache writes, x0.1 for cache reads.
+    assert s["cost_usd_list_prices"] == pytest.approx(
+        (3300 * 0.10 + 1200 * 0.10 * 1.25 + 400 * 0.10 * 0.1 + 200 * 0.50) / 1e6
+    )
     assert s["by_difficulty"]["simple"]["with_repair"]["successes"] == 2
     assert s["by_difficulty"]["moderate"]["without_repair"]["n"] == 2
     assert "challenging" not in s["by_difficulty"]  # both were excluded
@@ -220,8 +227,9 @@ def test_every_model_answers_the_same_questions_and_gold_runs_once(
     for model in (HAIKU, OPUS):
         s = summary_for(results, model)
         assert s["accuracy"]["with_repair"]["successes"] == 3
+    # Opus 5.5: $4 uncached, x1.25 for cache writes, x0.05 for cache reads.
     assert summary_for(results, OPUS)["cost_usd_list_prices"] == pytest.approx(
-        (4900 * 4 + 200 * 20) / 1e6
+        (3300 * 4 + 1200 * 4 * 1.25 + 400 * 4 * 0.05 + 200 * 20) / 1e6
     )
 
 
@@ -232,6 +240,25 @@ def test_unknown_models_get_tokens_but_no_dollar_figure(
     run(dataset, results, ScriptedGenerate(ANSWERS), models=("claude-test-1",))
     s = summary_for(results, "claude-test-1")
     assert s["tokens"]["input"] == 4900
+    assert s["cost_usd_list_prices"] is None
+
+
+def test_replies_recorded_without_a_cache_breakdown_have_no_dollar_figure(
+    dataset: BirdDataset, tmp_path: Path
+) -> None:
+    # Records from before the breakdown was recorded: their input mixes
+    # uncached and cached tokens, which cost different amounts, so no price.
+    results = tmp_path / "results.jsonl"
+    run(dataset, results, ScriptedGenerate(ANSWERS))
+    records = load_records(results)
+    for record in records:
+        for reply in record.get("replies", []):
+            reply.pop("cache_write_tokens", None)
+            reply.pop("cache_read_tokens", None)
+    ids = [str(qid) for qid in QUESTIONS]
+    s = summarize_suite(records, suite="bird", model=HAIKU, selected_ids=ids)
+    assert s["tokens"]["input"] == 4900
+    assert s["tokens"]["cache_breakdown_recorded"] is False
     assert s["cost_usd_list_prices"] is None
 
 
@@ -288,8 +315,12 @@ def test_report_has_n_intervals_ids_costs_and_rerun_commands(
     assert "| Answers cut off at the output cap, without / with repair | 0 / 0 | 0 / 0 |" in report
     assert "(partial" not in report
     assert "Where this differs from BIRD's official script" in report
-    assert "| Tokens in / out (measured) | 4,900 / 200 | 4,900 / 200 |" in report
-    assert "Cost, computed from list prices | $0.0006 | $0.0236 |" in report
+    tokens = "4,900 / 200 (cache writes 1,200, reads 400)"
+    assert (
+        f"| Tokens in / out (measured; in includes cache writes / reads) | {tokens} | {tokens} |"
+        in report
+    )
+    assert "Cost, computed from list prices | $0.0006 | $0.0233 |" in report
     assert "5 (error: " in report and "6 (timeout: " in report
     assert "1 2 3 4 5 6" in report
     assert "anthropic SDK: 2.3.0" in report

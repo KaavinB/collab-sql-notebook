@@ -12,6 +12,7 @@ from typing import Any
 
 from notebook_api.evals.bird import DIFFICULTIES
 from notebook_api.evals.pricing import (
+    CACHE_WRITE_MULTIPLIER,
     PRICE_TABLE,
     PRICES_COPIED_ON,
     PRICES_SOURCE,
@@ -50,17 +51,32 @@ def summarize_suite(
         }
 
     input_tokens = output_tokens = replies = long_prompts = 0
+    cache_write = cache_read = 0
+    # A reply recorded without its cache breakdown can't be priced: cache
+    # writes and reads cost differently from uncached input. Then the cost is
+    # "not computable" rather than a figure that's wrong in an unknown direction.
+    breakdown_known = True
     cost: float | None = 0.0
     for record in mine:  # every reply ever recorded is real spend, retries included
         for reply in record.get("replies", []):
             tokens_in = int(reply.get("input_tokens", 0))
             tokens_out = int(reply.get("output_tokens", 0))
+            written, read = reply.get("cache_write_tokens"), reply.get("cache_read_tokens")
             input_tokens += tokens_in
             output_tokens += tokens_out
             replies += 1
             long_prompts += is_long_prompt(model, tokens_in)
-            one = request_cost(model, tokens_in, tokens_out)
+            if not isinstance(written, int) or not isinstance(read, int):
+                # Dry runs report no tokens at all; only a reply with tokens matters.
+                if tokens_in or tokens_out:
+                    breakdown_known = False
+                written = read = 0
+            cache_write += written
+            cache_read += read
+            one = request_cost(model, tokens_in, tokens_out, written, read)
             cost = None if one is None or cost is None else cost + one
+    if not breakdown_known:
+        cost = None
 
     return {
         "selected": len(wanted),
@@ -102,7 +118,10 @@ def summarize_suite(
             "with_repair": _failures(scored, "final"),
         },
         "tokens": {
-            "input": input_tokens,
+            "input": input_tokens,  # every input token, cached parts included
+            "cache_write": cache_write,
+            "cache_read": cache_read,
+            "cache_breakdown_recorded": breakdown_known,
             "output": output_tokens,
             "replies": replies,
             "prompts_over_long_context_threshold": long_prompts,
@@ -167,6 +186,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
         f"- Concurrency: {run['concurrency']}; per-query timeout {run['query_timeout_seconds']:g} "
         f"s; row cap {run['row_cap']:,}",
         f"- Suites: {', '.join(run['suites'])}",
+        *_rebuilt_line(summary),
         "",
         "Rerun:",
         "",
@@ -183,6 +203,18 @@ def render_markdown(summary: dict[str, Any]) -> str:
         lines += _render_suite(suite_name, suite, run)
     lines += _render_method(run)
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _rebuilt_line(summary: dict[str, Any]) -> list[str]:
+    rebuilt = summary.get("rebuilt_by")
+    if not rebuilt:
+        return []
+    return [
+        "- This report was rebuilt from the run's stored answers (no model was asked again) "
+        f"by code: commit {rebuilt['git_commit']}"
+        f"{' with uncommitted changes' if rebuilt['git_dirty'] else ''} "
+        f"(source hash {str(rebuilt['code_sha256'])[:12]})"
+    ]
 
 
 def _render_suite(name: str, suite: dict[str, Any], run: dict[str, Any]) -> list[str]:
@@ -242,11 +274,26 @@ def _render_suite(name: str, suite: dict[str, Any], run: dict[str, Any]) -> list
         ),
         row("Not finished", lambda s: str(s["incomplete"])),
         row(
-            "Tokens in / out (measured)",
-            lambda s: f"{s['tokens']['input']:,} / {s['tokens']['output']:,}",
+            "Tokens in / out (measured; in includes cache writes / reads)",
+            lambda s: (
+                f"{s['tokens']['input']:,} / {s['tokens']['output']:,}"
+                + (
+                    f" (cache writes {s['tokens']['cache_write']:,}, "
+                    f"reads {s['tokens']['cache_read']:,})"
+                    if s["tokens"]["cache_breakdown_recorded"]
+                    else " (cache breakdown not recorded)"
+                )
+            ),
         ),
         row("Model calls", lambda s: str(s["tokens"]["replies"])),
-        row("Cost, computed from list prices", lambda s: _money(s["cost_usd_list_prices"])),
+        row(
+            "Cost, computed from list prices",
+            lambda s: (
+                _money(s["cost_usd_list_prices"])
+                if s["tokens"]["cache_breakdown_recorded"]
+                else "not computable for this run (cache writes and reads weren't recorded)"
+            ),
+        ),
         "",
     ]
     for model in models:
@@ -303,6 +350,7 @@ def _render_model_detail(model: str, s: dict[str, Any]) -> list[str]:
 def _render_method(run: dict[str, Any]) -> list[str]:
     prices = ", ".join(
         f"`{model}` ${p.base.input_per_mtok:g} / ${p.base.output_per_mtok:g}"
+        + f" (cache reads {p.base.cache_read_multiplier:g}x input)"
         + (
             f" (over {p.long_prompt_threshold:,} prompt tokens: "
             f"${p.long.input_per_mtok:g} / ${p.long.output_per_mtok:g})"
@@ -330,15 +378,22 @@ def _render_method(run: dict[str, Any]) -> list[str]:
         "whose gold SQL fails as wrong; here it's excluded and listed. (2) Text that isn't "
         "valid UTF-8 is read with the bad bytes replaced (the same way for gold and predicted "
         "results), where BIRD's script would fail on it. (3) BIRD stops queries after 30 s; "
-        f"this run used {run['query_timeout_seconds']:g} s, and a {run['row_cap']:,}-row cap.",
+        f"this run used {run['query_timeout_seconds']:g} s, and a {run['row_cap']:,}-row cap. "
+        "(4) BIRD's per-question evidence hints are included in the prompt, so scores compare "
+        "with BIRD's with-evidence setting only. (5) The schema is shown in this harness's own "
+        "format (CREATE TABLE text with a few sample values per column), not BIRD's.",
         "- **Unfinished questions** (a service failure before any answer) are left out of "
         "every rate and listed; a refusal is an answer, scored wrong.",
         "- **Valid SQL**: the attempt parsed as one SELECT and passed EXPLAIN on the database.",
         "- **Intervals** are 95% Wilson score intervals, computed by the harness from the counts "
         "shown.",
         "- **Tokens** are the input and output token counts the API reported on every reply, "
-        "summed (including replies to calls that later failed and were retried).",
+        "summed (including replies to calls that later failed and were retried). Input "
+        "includes the tokens written to and read from the prompt cache (the system prompt, "
+        "which holds the schema, is marked for caching).",
         f"- **Cost** is computed from list prices, not billed cost: USD per million input / "
-        f"output tokens {prices}; copied from {PRICES_SOURCE} on {PRICES_COPIED_ON}.",
+        f"output tokens {prices}; cache writes cost {CACHE_WRITE_MULTIPLIER:g}x input (5-minute "
+        f"TTL); copied from {PRICES_SOURCE} on {PRICES_COPIED_ON}. A run recorded without the "
+        "cache breakdown can't be priced and says so.",
         "",
     ]

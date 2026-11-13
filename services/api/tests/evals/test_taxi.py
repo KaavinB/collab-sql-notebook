@@ -223,3 +223,36 @@ def test_the_default_wiring_is_the_assistants_own_schema_and_validator(query_db:
             await wiring.aclose()
 
     asyncio.run(go())
+
+
+def test_invalid_settings_are_reported_without_their_values(
+    query_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "FAKE-short-secret-xyz"  # noqa: S105 (a fake, too short: 32 characters needed)
+    monkeypatch.setenv("AUTH_SECRET", secret)
+    with pytest.raises(TaxiSetupError) as raised:
+        default_taxi_wiring(query_db)
+    assert "auth_secret" in str(raised.value)
+    assert secret not in str(raised.value)
+
+
+def test_a_schema_that_cannot_be_read_is_a_setup_error(
+    query_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_api.ai import context
+    from notebook_api.ai.pipeline import AssistantUnavailableError
+
+    async def unreadable(runner: object, *, row_limit: int) -> context.SchemaRead:
+        raise AssistantUnavailableError("Couldn't read the database's schema.")
+
+    monkeypatch.setattr(context, "read_schema_context", unreadable)
+
+    async def go() -> None:
+        wiring = default_taxi_wiring(query_db)
+        try:
+            with pytest.raises(TaxiSetupError, match="couldn't read the taxi schema"):
+                await wiring.schema_context()
+        finally:
+            await wiring.aclose()
+
+    asyncio.run(go())

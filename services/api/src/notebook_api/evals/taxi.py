@@ -297,8 +297,14 @@ class NotebookTaxiWiring:
             )
         except ValidationError as error:
             shutil.rmtree(self._spill, ignore_errors=True)
+            # Field names and rules only: pydantic's own message quotes the
+            # input values, which here can be secrets (AUTH_SECRET, API keys).
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in e['loc']) or 'settings'}: {e['msg']}"
+                for e in error.errors(include_input=False, include_context=False)
+            )
             raise TaxiSetupError(
-                f"the API settings in the environment are invalid: {error}"
+                f"the API settings in the environment are invalid: {problems}"
             ) from None
         runner = build_query_runner(self._settings)
         if runner is None:  # pragma: no cover - duckdb_path is always set here
@@ -330,9 +336,16 @@ class NotebookTaxiWiring:
         async with self._lock:
             if self._schema is None:
                 await self._ready()
-                read = await read_schema_context(
-                    self._runner, row_limit=self._settings.query_row_limit
-                )
+                from notebook_api.ai.pipeline import AssistantUnavailableError
+
+                try:
+                    read = await read_schema_context(
+                        self._runner, row_limit=self._settings.query_row_limit
+                    )
+                except AssistantUnavailableError as error:
+                    raise TaxiSetupError(
+                        f"couldn't read the taxi schema: {error.message}"
+                    ) from None
                 if not read.complete:
                     raise TaxiSetupError(
                         "some tables' sample values couldn't be read, so the schema isn't the "
