@@ -23,16 +23,12 @@ import {
   deleteCell,
   isRunActive,
   moveCell,
-  setLastRun,
+  setLastRunIfUnchanged,
   type CellType,
   type CellView,
 } from "@/lib/notebook/doc";
-import {
-  connectNotebook,
-  type NotebookSync,
-  type ProviderFactory,
-  type SyncState,
-} from "@/lib/notebook/sync";
+import { closeConnection, openConnection } from "@/lib/notebook/connections";
+import { type NotebookSync, type ProviderFactory, type SyncState } from "@/lib/notebook/sync";
 import { useCells } from "@/lib/notebook/useCells";
 
 /**
@@ -70,22 +66,14 @@ export function NotebookEditor({
 
   // One live connection per mounted page. Created in an effect (not during
   // render) so React's development double-mount gets a fresh connection.
+  // A connection with offline edits outlives the page until they're synced
+  // (see connections.ts), so leaving through the app doesn't lose them.
   useEffect(() => {
-    const connection = connectNotebook(api, notebookId, createProvider);
+    const connection = openConnection(api, notebookId, createProvider);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- publishing an external object
     setSync(connection);
-    return () => connection.destroy();
+    return () => closeConnection(notebookId, connection);
   }, [api, notebookId, createProvider]);
-
-  // Warn before closing the tab with edits the server hasn't received.
-  useEffect(() => {
-    if (!sync) return;
-    const warn = (event: BeforeUnloadEvent) => {
-      if (sync.hasUnsyncedEdits()) event.preventDefault();
-    };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [sync]);
 
   if (loadError) {
     return (
@@ -308,9 +296,12 @@ function Cell({
     const sql = cell.source?.toString().trim();
     if (!sql) return;
     // runCell ignores a submit while this cell is already running, so only
-    // one run per cell can be in flight and re-point the cell.
+    // one run per cell can be in flight from this tab. The pointer it showed
+    // now is compared when the response arrives, so a slow response can't
+    // replace a newer result someone else produced meanwhile.
+    const before = cell.lastRunId;
     const stored = await runCell(cell.id, sql);
-    if (stored) setLastRun(doc, cell.id, stored.id);
+    if (stored) setLastRunIfUnchanged(doc, cell.id, before, stored.id);
   }, [cell, doc, runCell]);
 
   return (

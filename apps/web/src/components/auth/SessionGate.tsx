@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 
 import { SignIn } from "@/components/auth/SignIn";
 import { ApiError, createApiClient, type ApiClient, type User } from "@/lib/api";
+import { hasUnsyncedEdits } from "@/lib/notebook/connections";
 
 type SessionState =
   | { status: "loading" }
@@ -71,16 +72,27 @@ export function SessionGate({
   }, [api]);
 
   const [signOutError, setSignOutError] = useState<string | null>(null);
-  const signOut = useCallback(async () => {
-    try {
-      await api.logout();
-      setSignOutError(null);
-      setState({ status: "signed-out" });
-    } catch (error) {
-      // Still signed in: stay on the page and say so, so the user can retry.
-      setSignOutError(error instanceof ApiError ? error.message : "Could not sign out.");
-    }
-  }, [api]);
+  const [confirmingSignOut, setConfirmingSignOut] = useState(false);
+  const signOut = useCallback(
+    async (force = false) => {
+      // Offline edits only reach the server over a signed-in connection;
+      // signing out now would lose them, so ask first.
+      if (!force && hasUnsyncedEdits()) {
+        setConfirmingSignOut(true);
+        return;
+      }
+      setConfirmingSignOut(false);
+      try {
+        await api.logout();
+        setSignOutError(null);
+        setState({ status: "signed-out" });
+      } catch (error) {
+        // Still signed in: stay on the page and say so, so the user can retry.
+        setSignOutError(error instanceof ApiError ? error.message : "Could not sign out.");
+      }
+    },
+    [api],
+  );
 
   const value = useMemo(
     () => (state.status === "signed-in" ? { user: state.user, api, signOut } : null),
@@ -106,14 +118,27 @@ export function SessionGate({
     <SessionContext.Provider value={value}>
       <div className="mb-4 flex items-center justify-end gap-3 text-sm text-zinc-500">
         <span data-testid="signed-in-as">{value.user.name}</span>
+        {confirmingSignOut && (
+          <span role="alert" className="text-amber-700">
+            Some edits haven&apos;t reached the server yet. Signing out now loses them.{" "}
+            <button className="underline" onClick={() => void signOut(true)}>
+              Sign out anyway
+            </button>{" "}
+            <button className="underline" onClick={() => setConfirmingSignOut(false)}>
+              Cancel
+            </button>
+          </span>
+        )}
         {signOutError && (
           <span role="alert" className="text-red-600">
             {signOutError}
           </span>
         )}
-        <button className="underline" onClick={() => void signOut()}>
-          Sign out
-        </button>
+        {!confirmingSignOut && (
+          <button className="underline" onClick={() => void signOut()}>
+            Sign out
+          </button>
+        )}
       </div>
       {children}
     </SessionContext.Provider>

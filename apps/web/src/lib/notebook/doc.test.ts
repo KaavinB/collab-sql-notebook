@@ -12,6 +12,7 @@ import {
   orderedCells,
   readRunning,
   setLastRun,
+  setLastRunIfUnchanged,
 } from "@/lib/notebook/doc";
 
 const ids = (doc: Y.Doc) => orderedCells(doc).map((c) => c.id);
@@ -324,5 +325,26 @@ describe("running state", () => {
     const id = appendCell(doc, "markdown");
     cellsMap(doc).get(id)!.set("running", valid);
     expect(orderedCells(doc)[0].running).toBeNull();
+  });
+});
+
+describe("setLastRunIfUnchanged", () => {
+  it("re-points the cell only if nobody else did meanwhile", () => {
+    const doc = new Y.Doc();
+    const id = appendCell(doc, "sql");
+    expect(setLastRunIfUnchanged(doc, id, null, "r1")).toBe(true);
+    // A newer run landed while ours was in flight: ours must not replace it.
+    setLastRun(doc, id, "r2");
+    expect(setLastRunIfUnchanged(doc, id, "r1", "r1-late")).toBe(false);
+    expect(orderedCells(doc)[0].lastRunId).toBe("r2");
+    expect(setLastRunIfUnchanged(doc, id, "r2", "r3")).toBe(true);
+    expect(orderedCells(doc)[0].lastRunId).toBe("r3");
+  });
+
+  it("ignores missing and non-sql cells", () => {
+    const doc = new Y.Doc();
+    const md = appendCell(doc, "markdown");
+    expect(setLastRunIfUnchanged(doc, md, null, "r1")).toBe(false);
+    expect(setLastRunIfUnchanged(doc, "gone", null, "r1")).toBe(false);
   });
 });

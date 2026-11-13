@@ -22,6 +22,9 @@
  * - 4400 / 4413: the server rejected something this tab sent. Stop;
  *   reconnecting would send it again.
  *
+ * Repeated ticket refusals back off (1 s doubling to 15 s), so a server
+ * misconfiguration can't turn every open tab into a reconnect loop.
+ *
  * BroadcastChannel is off: by default y-websocket also syncs tabs of the
  * same browser directly, bypassing the server. A view-only tab and an
  * editing tab of the same browser would then share edits, and the
@@ -101,6 +104,11 @@ export function connectNotebook(
   let editedWhileOffline = false;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let ticketDelay = TICKET_RETRY_INITIAL_MS;
+  // Ticket refusals (4401/4403) in a row without reaching sync. If the API
+  // and the sync server disagree (different secrets, clocks more than a
+  // ticket's lifetime apart), every new ticket is refused too; backing off
+  // keeps each open tab from hammering both servers.
+  let refusals = 0;
 
   const set = (next: SyncState) => {
     if (destroyed) return;
@@ -152,6 +160,14 @@ export function connectNotebook(
   };
 
   const reconnectWithNewTicket = async () => {
+    refusals++;
+    if (refusals > 1) {
+      const delay = Math.min(TICKET_RETRY_INITIAL_MS * 2 ** (refusals - 2), TICKET_RETRY_MAX_MS);
+      await new Promise<void>((resolve) => {
+        retryTimer = setTimeout(resolve, delay);
+      });
+      if (destroyed) return;
+    }
     const ticket = await fetchTicket();
     if (!ticket || destroyed || !provider) return;
     provider.params = { ticket: ticket.ticket };
@@ -186,6 +202,7 @@ export function connectNotebook(
       if (!synced || state.status === "stopped") return;
       loaded = true;
       editedWhileOffline = false;
+      refusals = 0;
       set({ status: "live", role: role() ?? ticket.role });
     });
     created.on("closed", onClosed);

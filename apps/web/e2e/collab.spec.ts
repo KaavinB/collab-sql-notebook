@@ -87,6 +87,29 @@ test("a run anyone starts is shown to everyone, and survives a reload", async ({
   }
 });
 
+test("a run one person starts shows as running for everyone, then its outcome", async ({
+  browser,
+}) => {
+  const { ada, grace, close } = await twoPeople(browser, "editor");
+  try {
+    await ada.getByRole("button", { name: "+ SQL" }).click();
+    await ada.locator(".cm-content").first().click();
+    // Long enough to watch: a cross join that runs until the query timeout.
+    await ada.keyboard.type("select sum(a.passenger_count) from trips a, trips b");
+    await expect.poll(() => cellText(grace)).toContain("trips b");
+    await ada.getByRole("button", { name: "Run" }).click();
+
+    // Grace never pressed Run: she learns of it through the API's NOTIFY,
+    // the sync server and the shared document.
+    await expect(grace.getByText(/^Running… \(started by Ada/)).toBeVisible();
+    await expect(grace.getByRole("button", { name: "Running…" })).toBeDisabled();
+    await expect(grace.getByText(/took longer than/)).toBeVisible({ timeout: 30_000 });
+    await expect(grace.getByRole("button", { name: "Run" })).toBeEnabled();
+  } finally {
+    await close();
+  }
+});
+
 test("a viewer sees edits live but can't change anything", async ({ browser }) => {
   const { ada, grace, close } = await twoPeople(browser, "viewer");
   try {

@@ -327,15 +327,19 @@ export class Room {
     }, SERVER_ORIGIN);
   }
 
-  /** Executions the document shows as running, by cell ID. */
-  runningExecutions(): Map<string, string> {
-    const running = new Map<string, string>();
+  /** Cells the document shows as running: their execution and the run they point at now. */
+  runningExecutions(): Map<string, { executionId: string; lastRunId: string | null }> {
+    const running = new Map<string, { executionId: string; lastRunId: string | null }>();
     const cells = this.doc.getMap<unknown>("cells");
     cells.forEach((cell, cellId) => {
       if (!(cell instanceof Y.Map) || cell.get("type") !== "sql") return;
       const state = cell.get("running") as { executionId?: unknown } | null | undefined;
       if (state && typeof state === "object" && typeof state.executionId === "string") {
-        running.set(cellId, state.executionId);
+        const lastRunId = cell.get("lastRunId");
+        running.set(cellId, {
+          executionId: state.executionId,
+          lastRunId: typeof lastRunId === "string" ? lastRunId : null,
+        });
       }
     });
     return running;

@@ -11,9 +11,12 @@
  *     cell.get("lastRunId") string | null, for sql cells (results live in
  *                           Postgres; the document only points at them)
  *     cell.get("running")   { executionId, by, startedAt, expiresAt } | null,
- *                           for sql cells: a run in progress. Written only by
- *                           the sync server, when the API reports a run
- *                           starting and finishing, so everyone sees it.
+ *                           for sql cells: a run in progress, written by the
+ *                           sync server when the API reports a run starting
+ *                           and finishing, so everyone sees it. Nothing stops
+ *                           an editor's own client writing it too (editors
+ *                           can change anything in the document), so it's a
+ *                           display hint, not proof of who ran what.
  *     cell.get("chart")     Y.Map, for chart cells: the ChartConfig,
  *                           one entry per field (see chart.ts)
  *
@@ -275,6 +278,31 @@ export function setLastRun(doc: Y.Doc, id: string, runId: string): void {
     const cell = cellsMap(doc).get(id);
     if (cell && cell.get("type") === "sql") cell.set("lastRunId", runId);
   });
+}
+
+/**
+ * Points a sql cell at `runId` only if it still points at `expected` (what
+ * it showed when Run was pressed). If the pointer moved meanwhile, someone's
+ * newer run (or the sync server announcing this same run) got there first,
+ * and a late response must not move the cell back to an older result.
+ * Returns whether it changed the pointer.
+ */
+export function setLastRunIfUnchanged(
+  doc: Y.Doc,
+  id: string,
+  expected: string | null,
+  runId: string,
+): boolean {
+  let changed = false;
+  doc.transact(() => {
+    const cell = cellsMap(doc).get(id);
+    if (!cell || cell.get("type") !== "sql") return;
+    const current = cell.get("lastRunId");
+    if ((typeof current === "string" ? current : null) !== expected) return;
+    cell.set("lastRunId", runId);
+    changed = true;
+  });
+  return changed;
 }
 
 /** The chart config map of a chart cell, created if a peer left it out. */

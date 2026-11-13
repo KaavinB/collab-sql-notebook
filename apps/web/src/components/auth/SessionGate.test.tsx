@@ -3,13 +3,17 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SessionGate, useSession } from "@/components/auth/SessionGate";
+import { appendCell } from "@/lib/notebook/doc";
+import { openConnection, resetConnections } from "@/lib/notebook/connections";
+import { fakeProviders } from "@/test/fakeSync";
 import { ApiError, type ApiClient } from "@/lib/api";
-import { deferred, fakeApi, USER } from "@/test/fakeApi";
+import { deferred, fakeApi, NOTEBOOK, USER } from "@/test/fakeApi";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/notebooks/abc" }));
 
 afterEach(() => {
   cleanup();
+  resetConnections();
   window.history.replaceState(null, "", "/");
 });
 
@@ -135,6 +139,29 @@ describe("SessionGate", () => {
     expect(screen.getByText("Hello Ada")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Sign out" })); // retry works
     expect(await screen.findByLabelText("Dev user name")).toBeTruthy();
+  });
+
+  it("asks before signing out while offline edits haven't reached the server", async () => {
+    const providers = fakeProviders();
+    const sync = openConnection(fakeApi(), NOTEBOOK.id, providers.factory);
+    await act(async () => {});
+    providers.latest().serve();
+    providers.latest().drop();
+    appendCell(sync.doc, "sql");
+    const api = fakeApi();
+    render(
+      <SessionGate api={api}>
+        <Who />
+      </SessionGate>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/haven.t reached the server/);
+    expect(api.logout).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByText("Hello Ada")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sign out anyway" }));
+    await waitFor(() => expect(api.logout).toHaveBeenCalledTimes(1));
   });
 
   it("shows a non-auth failure as an error, not as signed out", async () => {

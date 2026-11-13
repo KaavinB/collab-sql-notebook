@@ -28,6 +28,10 @@ export interface ManagerTimings extends RoomTimings {
   awarenessSweepMs: number;
 }
 
+// After a lock's expiry, wait this much longer before re-checking: the
+// expiry comes from the database's clock, the timer from this server's.
+const EXPIRY_CHECK_SLACK_MS = 2_000;
+
 export const DEFAULT_MANAGER_TIMINGS: ManagerTimings = {
   ...DEFAULT_TIMINGS,
   unloadGraceMs: 10_000,
@@ -39,6 +43,8 @@ export class RoomManager {
   readonly rooms = new Map<string, Room>();
   private stopping = false;
   private readonly sweepTimer: NodeJS.Timeout;
+  /** Re-checks scheduled for when a run's lock expires (see run_started). */
+  private readonly expiryChecks = new Set<NodeJS.Timeout>();
 
   private readonly store: Store;
   private readonly timings: ManagerTimings;
@@ -193,6 +199,7 @@ export class RoomManager {
             expiresAt: event.expiresAt,
           }),
         );
+        if (event.expiresAt) this.checkWhenExpired(event.notebookId, event.expiresAt);
         break;
       case "run_finished":
         void this.withRoom(event.notebookId, (room) =>
@@ -258,6 +265,23 @@ export class RoomManager {
   }
 
   /**
+   * Re-checks a notebook's runs shortly after a run's lock expires. If the
+   * API process running it died, no run_finished ever comes, and without
+   * this a room that stays loaded would show the run forever. (A room that
+   * isn't loaded by then is reconciled when it next loads.)
+   */
+  private checkWhenExpired(notebookId: string, expiresAt: string): void {
+    const delay = Math.max(0, Date.parse(expiresAt) - Date.now()) + EXPIRY_CHECK_SLACK_MS;
+    const timer = setTimeout(() => {
+      this.expiryChecks.delete(timer);
+      const room = this.rooms.get(notebookId);
+      if (room && !this.stopping) void this.reconcileRuns(room);
+    }, delay);
+    timer.unref();
+    this.expiryChecks.add(timer);
+  }
+
+  /**
    * Settles cells the document shows as running whose execution is over,
    * for when its run_finished was missed: the listener was reconnecting, or
    * the API process running it died (its lock then expires). Each such cell
@@ -270,12 +294,23 @@ export class RoomManager {
     if (running.size === 0) return;
     room.holds++;
     try {
-      const { live, runs } = await this.store.executionOutcomes(room.id, [...running.values()]);
+      const cells = [...running.values()];
+      const { live, runs, times } = await this.store.executionOutcomes(
+        room.id,
+        cells.map((cell) => cell.executionId),
+        cells.flatMap((cell) => (cell.lastRunId ? [cell.lastRunId] : [])),
+      );
       if (room.status !== "ready") return;
-      for (const [cellId, executionId] of running) {
+      for (const [cellId, { executionId, lastRunId }] of running) {
         if (live.has(executionId)) continue;
-        room.runFinished(cellId, executionId, runs.get(executionId) ?? null);
-        log.info("run.reconciled", { notebook: room.id, cell: cellId });
+        // Only a newer result may replace the one the cell shows: while the
+        // listener was down, someone may already have run the cell again
+        // (their client points it at that later run itself).
+        const stored = runs.get(executionId);
+        const shownAt = lastRunId ? times.get(lastRunId) : undefined;
+        const newer = stored && (shownAt === undefined || stored.at > shownAt);
+        room.runFinished(cellId, executionId, newer ? stored.id : null);
+        log.info("run.reconciled", { notebook: room.id, cell: cellId, repointed: Boolean(newer) });
       }
     } catch (error) {
       log.warn("run.reconcile_failed", { notebook: room.id, error: errorMessage(error) });
@@ -314,6 +349,8 @@ export class RoomManager {
   async shutdown(): Promise<void> {
     this.stopping = true;
     clearInterval(this.sweepTimer);
+    for (const timer of this.expiryChecks) clearTimeout(timer);
+    this.expiryChecks.clear();
     const rooms = [...this.rooms.values()];
     for (const room of rooms) {
       this.cancelUnload(room);

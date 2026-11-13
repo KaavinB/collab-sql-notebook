@@ -35,6 +35,12 @@ export interface LoadedDocument {
   logRows: number;
 }
 
+/** A stored run: its ID and when it finished (cell_runs.created_at, ms). */
+export interface StoredRun {
+  id: string;
+  at: number;
+}
+
 export interface CompactResult {
   /** Log rows merged into the snapshot and deleted. */
   mergedRows: number;
@@ -204,28 +210,39 @@ export class Store {
   /**
    * What became of executions the document shows as running, from the API's
    * tables: `live` holds those that still hold an unexpired lock; `runs`
-   * maps each finished execution that stored a run to that run's ID. An
-   * execution in neither ended without storing anything (a service failure,
-   * or its API process died and the lock expired).
+   * maps each finished execution that stored a run to that run. An execution
+   * in neither ended without storing anything (a service failure, or its API
+   * process died and the lock expired).
+   *
+   * `pointedAt` are the runs those cells show now; their times come back in
+   * `times`, so the caller never moves a cell back to an older result.
    */
   async executionOutcomes(
     notebookId: string,
     executionIds: string[],
-  ): Promise<{ live: Set<string>; runs: Map<string, string> }> {
-    if (executionIds.length === 0) return { live: new Set(), runs: new Map() };
+    pointedAt: string[],
+  ): Promise<{ live: Set<string>; runs: Map<string, StoredRun>; times: Map<string, number> }> {
+    if (executionIds.length === 0) return { live: new Set(), runs: new Map(), times: new Map() };
     const live = await this.pool.query<{ execution_id: string }>(
       `SELECT execution_id::text FROM cell_executions
        WHERE notebook_id = $1 AND execution_id::text = ANY($2) AND expires_at > now()`,
       [notebookId, executionIds],
     );
-    const runs = await this.pool.query<{ execution_id: string; id: string }>(
-      `SELECT execution_id::text, id::text FROM cell_runs
+    const runs = await this.pool.query<{ execution_id: string; id: string; created_at: Date }>(
+      `SELECT execution_id::text, id::text, created_at FROM cell_runs
        WHERE notebook_id = $1 AND execution_id::text = ANY($2)`,
       [notebookId, executionIds],
     );
+    const pointed = await this.pool.query<{ id: string; created_at: Date }>(
+      `SELECT id::text, created_at FROM cell_runs WHERE notebook_id = $1 AND id::text = ANY($2)`,
+      [notebookId, pointedAt],
+    );
     return {
       live: new Set(live.rows.map((row) => row.execution_id)),
-      runs: new Map(runs.rows.map((row) => [row.execution_id, row.id])),
+      runs: new Map(
+        runs.rows.map((row) => [row.execution_id, { id: row.id, at: row.created_at.getTime() }]),
+      ),
+      times: new Map(pointed.rows.map((row) => [row.id, row.created_at.getTime()])),
     };
   }
 }

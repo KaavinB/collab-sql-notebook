@@ -393,4 +393,31 @@ describe("reconciling runs whose end was missed", () => {
     await waitFor(() => cellOf(c.doc, CELL)?.get("lastRunId") === run, "reconciled run");
     expect(cellOf(c.doc, CELL)!.get("running")).toBeNull();
   });
+
+  it("never moves a cell back to an older result than the one it shows", async () => {
+    const { nb, c } = await openNotebook();
+    const first = randomUUID();
+    await notify(started(nb, first));
+    await waitFor(() => cellOf(c.doc, CELL)?.get("running") != null, "running state");
+    // While the listener is down: the first run finishes, then someone runs
+    // the cell again and their client points it at that newer run itself.
+    const older = await storeRun(nb, first);
+    await sleep(5); // distinct created_at
+    const newer = await storeRun(nb, randomUUID());
+    c.doc.transact(() => cellOf(c.doc, CELL)!.set("lastRunId", newer));
+    await killListener();
+    await waitFor(() => cellOf(c.doc, CELL)?.get("running") === null, "running cleared");
+    expect(cellOf(c.doc, CELL)!.get("lastRunId")).toBe(newer);
+    expect(older).not.toBe(newer);
+  });
+
+  it("clears a run whose API process died, once its lock has expired", async () => {
+    const { nb, c } = await openNotebook();
+    const execution = randomUUID();
+    // The lock lapses at once and no run_finished will ever come.
+    await notify({ ...started(nb, execution), expires_at: new Date().toISOString() });
+    await waitFor(() => cellOf(c.doc, CELL)?.get("running") != null, "running state");
+    await waitFor(() => cellOf(c.doc, CELL)?.get("running") === null, "running cleared", 6_000);
+    expect(cellOf(c.doc, CELL)!.get("lastRunId")).toBeNull();
+  });
 });

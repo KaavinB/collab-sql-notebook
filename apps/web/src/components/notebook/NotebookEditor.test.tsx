@@ -16,6 +16,7 @@ import { ApiError, type ApiClient, type Notebook } from "@/lib/api";
 import { appendCell, cellsMap, orderedCells, setLastRun } from "@/lib/notebook/doc";
 import { fakeApi, NOTEBOOK } from "@/test/fakeApi";
 import { fakeProviders } from "@/test/fakeSync";
+import { resetConnections } from "@/lib/notebook/connections";
 
 // CodeMirror needs real layout APIs that jsdom lacks; the editor binding is
 // covered by the Playwright tests. Here it's a stand-in that shows the text.
@@ -33,7 +34,10 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  resetConnections();
+});
 
 // The whole notebook renders in each test; under a loaded machine (the web and
 // sync suites run in parallel) the default 1 s for findBy/waitFor was seen to
@@ -121,25 +125,56 @@ describe("NotebookEditor", () => {
     );
   });
 
-  it("shows a run someone else started, until its lock expires", async () => {
+  it("shows a run someone else started, and stops once its lock has expired", async () => {
     const doc = new Y.Doc();
     appendCell(doc, "sql", "sql-1");
-    // Long enough to render under a loaded test machine, short enough to wait out.
-    const expiresAt = new Date(Date.now() + 1_500).toISOString();
-    cellsMap(doc).get("sql-1")!.set("running", {
+    const running = (expiresAt: string) => ({
       executionId: "e1",
       by: "Grace",
       startedAt: new Date().toISOString(),
       expiresAt,
     });
-    const { serve } = renderEditor();
+    // Far in the future, so a slow render can't race the expiry.
+    cellsMap(doc)
+      .get("sql-1")!
+      .set("running", running(new Date(Date.now() + 3_600_000).toISOString()));
+    const { providers, serve } = renderEditor();
     await serve(Y.encodeStateAsUpdate(doc));
     expect(await screen.findByText("Running… (started by Grace)")).toBeTruthy();
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Running…" }).disabled).toBe(true);
-    await waitFor(() => expect(screen.queryByText(/started by Grace/)).toBeNull(), {
-      timeout: 5000,
-    });
+    // The same run, now past its lock's expiry (its API process died).
+    const expired = new Y.Doc();
+    Y.applyUpdate(expired, Y.encodeStateAsUpdate(providers.latest().doc));
+    cellsMap(expired)
+      .get("sql-1")!
+      .set("running", running(new Date(Date.now() - 1).toISOString()));
+    act(() =>
+      providers
+        .latest()
+        .remote(Y.encodeStateAsUpdate(expired, Y.encodeStateVector(providers.latest().doc))),
+    );
+    await waitFor(() => expect(screen.queryByText(/started by Grace/)).toBeNull());
     expect(screen.getByRole("button", { name: "Run" })).toBeTruthy();
+  });
+
+  it("keeps offline edits when the page is left, and has them when it's reopened", async () => {
+    const { providers, serve } = renderEditor();
+    await serve();
+    act(() => providers.latest().drop());
+    fireEvent.click(screen.getByRole("button", { name: "+ SQL" }));
+    cleanup(); // leave the page (e.g. "← Notebooks")
+    expect(providers.latest().destroyed).toBe(false);
+
+    render(
+      <NotebookEditor
+        notebookId={NOTEBOOK.id}
+        api={fakeApi()}
+        createProvider={providers.factory}
+      />,
+    );
+    expect(providers.created).toHaveLength(1); // the same connection, not a new one
+    act(() => providers.latest().serve());
+    expect(await screen.findByTestId("editor")).toBeTruthy(); // the offline cell is still there
   });
 
   it("shows who is here", async () => {

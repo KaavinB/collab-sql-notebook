@@ -153,6 +153,27 @@ describe("connectNotebook", () => {
     expect(sync.get().status).toBe("connecting");
   });
 
+  it("backs off when new tickets keep being refused", async () => {
+    vi.useFakeTimers();
+    const syncTicket = vi.fn<ApiClient["syncTicket"]>(async () => ticket());
+    const { providers } = connect(fakeApi({ syncTicket }));
+    await vi.advanceTimersByTimeAsync(0);
+    const provider = providers.latest();
+    provider.close(4401); // first refusal: reconnect at once
+    await vi.advanceTimersByTimeAsync(0);
+    expect(provider.connects).toBe(1);
+    provider.close(4401); // refused again: wait before trying
+    await vi.advanceTimersByTimeAsync(500);
+    expect(provider.connects).toBe(1);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(provider.connects).toBe(2);
+    // Reaching sync resets it.
+    provider.serve();
+    provider.close(4401);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(provider.connects).toBe(3);
+  });
+
   it("destroys the provider and stops notifying when destroyed", async () => {
     const { sync, providers } = connect(fakeApi());
     await flush();
