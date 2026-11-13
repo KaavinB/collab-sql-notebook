@@ -64,3 +64,7 @@ def write_query_test_db(path: Path) -> Path:
             """
         )
     return path
+
+
+def exit_immediately(*_args: object) -> None:
+    """A worker target that exits before saying hello (for runner startup tests)."""

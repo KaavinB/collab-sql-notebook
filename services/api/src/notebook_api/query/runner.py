@@ -218,22 +218,33 @@ class QueryRunner:
         try:
             await asyncio.to_thread(process.start)
             child_conn.close()  # the parent keeps only its own end
-            raw = await self._receive(parent_conn, _WORKER_START_TIMEOUT_SECONDS, 64_000)
+            try:
+                raw = await self._receive(parent_conn, _WORKER_START_TIMEOUT_SECONDS, 64_000)
+            except (EOFError, OSError) as error:
+                # The worker exited (or its pipe broke) before saying hello.
+                raise WorkerStartError("query worker exited during startup") from error
             if raw is None:
                 raise WorkerStartError("query worker did not start in time")
             hello = json.loads(raw)
             if not hello.get("ready"):
                 raise WorkerStartError(f"query worker failed to start: {hello.get('message')}")
         except BaseException:
+            # If start() failed, the child's end of the pipe was never handed
+            # over or closed; close it here, or retries under fd exhaustion
+            # (EMFILE) would leak another descriptor each time.
+            child_conn.close()
             await asyncio.to_thread(self._kill, worker)
             raise
         return worker
 
     def _kill(self, worker: _Worker) -> None:
         """Blocking: run it in a thread."""
-        if worker.process.is_alive():
-            worker.process.kill()
-        worker.process.join(timeout=5)
+        # pid is None if start() itself failed; there's no process to stop,
+        # and join() would raise, hiding the original error.
+        if worker.process.pid is not None:
+            if worker.process.is_alive():
+                worker.process.kill()
+            worker.process.join(timeout=5)
         worker.conn.close()
         shutil.rmtree(worker.spill_dir, ignore_errors=True)
 

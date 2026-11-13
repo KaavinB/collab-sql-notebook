@@ -10,8 +10,8 @@
  *     cell.get("source")    Y.Text, for sql and markdown cells
  *     cell.get("lastRunId") string | null, for sql cells (D6: results live in
  *                           Postgres; the document only points at them)
- *   Chart cells get their ChartConfig (D9) in the chart-cell task; for now a
- *   chart cell is only a type and a position.
+ *     cell.get("chart")     Y.Map, for chart cells: the ChartConfig (D9),
+ *                           one entry per field (see chart.ts)
  *
  * Why a map plus an `order` string, not a Y.Array of cells: Yjs arrays have no
  * "move". A move is delete + insert, so two people moving the same cell at
@@ -27,6 +27,8 @@
 import { generateKeyBetween, generateNKeysBetween } from "fractional-indexing";
 import * as Y from "yjs";
 
+import { newChartMap, readChartConfig, type ChartConfig } from "@/lib/notebook/chart";
+
 export const CELL_TYPES = ["sql", "markdown", "chart"] as const;
 export type CellType = (typeof CELL_TYPES)[number];
 
@@ -37,6 +39,8 @@ export interface CellView {
   /** The editable text of a sql or markdown cell; null for chart cells. */
   source: Y.Text | null;
   lastRunId: string | null;
+  /** The chart's config, for chart cells; null otherwise. */
+  chart: ChartConfig | null;
 }
 
 const CELLS_KEY = "cells";
@@ -97,6 +101,7 @@ function readCell(id: string, cell: unknown): CellView | null {
     order,
     source: source instanceof Y.Text ? source : null,
     lastRunId: typeof lastRunId === "string" ? lastRunId : null,
+    chart: type === "chart" ? readChartConfig(cell.get("chart")) : null,
   };
 }
 
@@ -187,6 +192,7 @@ export function insertCell(
     cell.set("order", plan.key);
     if (type !== "chart") cell.set("source", new Y.Text());
     if (type === "sql") cell.set("lastRunId", null);
+    if (type === "chart") cell.set("chart", newChartMap());
     cellsMap(doc).set(id, cell);
   });
   return id;
@@ -227,4 +233,15 @@ export function setLastRun(doc: Y.Doc, id: string, runId: string): void {
     const cell = cellsMap(doc).get(id);
     if (cell && cell.get("type") === "sql") cell.set("lastRunId", runId);
   });
+}
+
+/** The chart config map of a chart cell, created if a peer left it out. */
+export function chartMap(doc: Y.Doc, id: string): Y.Map<unknown> | null {
+  const cell = cellsMap(doc).get(id);
+  if (!cell || cell.get("type") !== "chart") return null;
+  const existing = cell.get("chart");
+  if (existing instanceof Y.Map) return existing;
+  const created = newChartMap();
+  doc.transact(() => cell.set("chart", created));
+  return created;
 }

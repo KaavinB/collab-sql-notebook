@@ -5,7 +5,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, type ApiClient, type Run } from "@/lib/api";
 
 export type RunState =
-  { status: "idle" } | { status: "running" } | { status: "failed"; message: string };
+  | { status: "idle" }
+  /** `ignoredSubmit`: the user pressed Run again while this run was in flight. */
+  | { status: "running"; ignoredSubmit?: boolean }
+  | { status: "failed"; message: string };
 
 /** Why a run the document points at couldn't be shown. */
 export type RunLoadFailure = "missing" | "error";
@@ -71,7 +74,11 @@ export function useRuns(api: ApiClient, notebookId: string) {
    */
   const runCell = useCallback(
     async (cellId: string, sql: string): Promise<Run | null> => {
-      if (inFlight.current.has(cellId)) return null;
+      if (inFlight.current.has(cellId)) {
+        // Say so, rather than dropping the submit silently.
+        setCellState(cellId, { status: "running", ignoredSubmit: true });
+        return null;
+      }
       const controller = new AbortController();
       inFlight.current.set(cellId, controller);
       setCellState(cellId, { status: "running" });

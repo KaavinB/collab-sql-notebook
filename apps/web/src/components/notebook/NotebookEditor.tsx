@@ -4,18 +4,19 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import * as Y from "yjs";
 
+import { CellFrame, MarkdownCellBody, RunButton, SqlCellBody } from "@/components/notebook/Cells";
 import {
-  CellFrame,
   ChartCellBody,
-  MarkdownCellBody,
-  RunButton,
-  SqlCellBody,
-} from "@/components/notebook/Cells";
+  type ChartSource,
+  type SqlCellOption,
+} from "@/components/notebook/ChartCell";
 import { useRuns } from "@/components/notebook/useRuns";
 import { ApiError, createApiClient, type ApiClient, type Notebook } from "@/lib/api";
 import { attachAutosave, LOAD_ORIGIN, type Autosave } from "@/lib/notebook/autosave";
+import { writeChartConfig, type ChartConfig } from "@/lib/notebook/chart";
 import {
   appendCell,
+  chartMap,
   deleteCell,
   moveCell,
   setLastRun,
@@ -155,6 +156,15 @@ function LoadedNotebook({
   const { doc, notebook } = loaded;
   const cells = useCells(doc);
   const { runs, loadFailures, cellStates, ensureRun, runCell } = useRuns(api, notebook.id);
+  // SQL cells a chart can draw from, labelled by their position. (Not by their
+  // text: this list only updates on structural changes, not while typing.)
+  const sqlCells = useMemo(
+    () =>
+      cells.flatMap((cell, index) =>
+        cell.type === "sql" ? [{ id: cell.id, label: `SQL cell ${index + 1}` }] : [],
+      ),
+    [cells],
+  );
 
   return (
     <div className="space-y-4">
@@ -181,6 +191,8 @@ function LoadedNotebook({
           cellStates={cellStates}
           ensureRun={ensureRun}
           runCell={runCell}
+          sqlCells={sqlCells}
+          cells={cells}
         />
       ))}
 
@@ -199,6 +211,8 @@ function Cell({
   cellStates,
   ensureRun,
   runCell,
+  sqlCells,
+  cells,
 }: {
   doc: Y.Doc;
   cell: CellView;
@@ -209,6 +223,8 @@ function Cell({
   cellStates: ReturnType<typeof useRuns>["cellStates"];
   ensureRun: (runId: string) => void;
   runCell: ReturnType<typeof useRuns>["runCell"];
+  sqlCells: SqlCellOption[];
+  cells: CellView[];
 }) {
   const state = cellStates.get(cell.id) ?? { status: "idle" as const };
   const run = useCallback(async () => {
@@ -241,8 +257,71 @@ function Cell({
         />
       )}
       {cell.type === "markdown" && cell.source && <MarkdownCellBody source={cell.source} />}
-      {cell.type === "chart" && <ChartCellBody />}
+      {cell.type === "chart" && cell.chart && (
+        <ChartCell
+          doc={doc}
+          cell={cell}
+          config={cell.chart}
+          sqlCells={sqlCells}
+          cells={cells}
+          runs={runs}
+          loadFailures={loadFailures}
+          ensureRun={ensureRun}
+        />
+      )}
     </CellFrame>
+  );
+}
+
+/** A chart cell: its config form, drawn from the source SQL cell's latest result. */
+function ChartCell({
+  doc,
+  cell,
+  config,
+  sqlCells,
+  cells,
+  runs,
+  loadFailures,
+  ensureRun,
+}: {
+  doc: Y.Doc;
+  cell: CellView;
+  config: ChartConfig;
+  sqlCells: SqlCellOption[];
+  cells: CellView[];
+  runs: ReturnType<typeof useRuns>["runs"];
+  loadFailures: ReturnType<typeof useRuns>["loadFailures"];
+  ensureRun: (runId: string) => void;
+}) {
+  const sourceCell = cells.find((c) => c.id === config.source && c.type === "sql");
+  const lastRunId = sourceCell?.lastRunId ?? null;
+  useEffect(() => {
+    if (lastRunId && !runs.has(lastRunId)) ensureRun(lastRunId);
+  }, [lastRunId, runs, ensureRun]);
+  const run = lastRunId ? runs.get(lastRunId) : undefined;
+
+  let source: ChartSource;
+  if (!config.source) source = { kind: "unset" };
+  else if (!sourceCell) source = { kind: "deleted" };
+  else if (!lastRunId) source = { kind: "not-run" };
+  else if (run?.status === "ok") source = { kind: "ready", result: run.result };
+  else if (run?.status === "error") source = { kind: "failed", message: run.error.message };
+  // A pruned or deleted run (404) is gone; any other failure was transient
+  // and the run is still stored.
+  else if (loadFailures.get(lastRunId) === "missing") source = { kind: "unavailable" };
+  else if (loadFailures.get(lastRunId) === "error") source = { kind: "load-error" };
+  else source = { kind: "loading" };
+
+  return (
+    <ChartCellBody
+      config={config}
+      sqlCells={sqlCells}
+      source={source}
+      onChange={(patch) => {
+        const map = chartMap(doc, cell.id);
+        if (map) writeChartConfig(map, patch);
+      }}
+    />
   );
 }
 

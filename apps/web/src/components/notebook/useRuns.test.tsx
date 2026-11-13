@@ -42,6 +42,20 @@ describe("useRuns", () => {
     expect(runCell).toHaveBeenCalledTimes(2);
   });
 
+  it("flags an ignored submit, and clears the flag when the run settles", async () => {
+    const first = deferred<Run>();
+    const api = fakeApi({ runCell: vi.fn<ApiClient["runCell"]>(() => first.promise) });
+    const { result } = renderHook(() => useRuns(api, NOTEBOOK.id));
+    act(() => void result.current.runCell("c1", "select 1"));
+    expect(result.current.cellStates.get("c1")).toEqual({ status: "running" });
+    await act(async () => {
+      expect(await result.current.runCell("c1", "select 2")).toBeNull();
+    });
+    expect(result.current.cellStates.get("c1")).toEqual({ status: "running", ignoredSubmit: true });
+    await act(async () => first.resolve(okRun("r1", 1)));
+    expect(result.current.cellStates.get("c1")).toEqual({ status: "idle" });
+  });
+
   it("allows running again after a failed run", async () => {
     const runCell = vi
       .fn<ApiClient["runCell"]>()

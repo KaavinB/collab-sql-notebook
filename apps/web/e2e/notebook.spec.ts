@@ -97,3 +97,67 @@ test("an unknown notebook shows an error with a way back", async ({ page }) => {
   await expect(page.getByRole("alert").filter({ hasText: "Notebook not found." })).toBeVisible();
   await expect(page.getByRole("link", { name: "Back to notebooks" })).toBeVisible();
 });
+
+test("chart a SQL cell's result, and the chart survives a reload", async ({ page, request }) => {
+  const created = await request.post(`${API}/notebooks`, {
+    data: { title: `E2E chart ${Date.now()}` },
+  });
+  const notebookId = (await created.json()).id as string;
+  try {
+    await page.goto(`/notebooks/${notebookId}`);
+    await page.getByRole("button", { name: "+ SQL" }).click();
+    await typeInLastEditor(
+      page,
+      "select payment_type, count(*) as trips from trips group by all order by payment_type",
+    );
+    await page.getByRole("button", { name: "Run" }).click();
+    const summary = page.getByTestId("result-summary");
+    await expect(summary).toContainText("rows");
+    const rows = Number((await summary.textContent())!.match(/^(\d+) rows/)![1]);
+
+    await page.getByRole("button", { name: "+ Chart" }).click();
+    await expect(page.getByTestId("chart-hint")).toHaveText("Choose a SQL cell to chart.");
+    await page.getByLabel("Chart data").selectOption({ index: 1 });
+    await page.getByLabel("Chart x").selectOption("payment_type");
+    await page.getByLabel("Chart y").selectOption("trips");
+    const bars = page.getByTestId("chart").locator(".mark-rect path");
+    await expect(bars).toHaveCount(rows);
+
+    await expect(page.getByTestId("save-status")).toHaveText("Saved", { timeout: 10_000 });
+    await page.reload();
+    await expect(page.getByLabel("Chart x")).toHaveValue("payment_type");
+    await expect(page.getByTestId("chart").locator(".mark-rect path")).toHaveCount(rows);
+  } finally {
+    await request.delete(`${API}/notebooks/${notebookId}`);
+  }
+});
+
+test("a bar chart over daily timestamps draws visible bars", async ({ page, request }) => {
+  const created = await request.post(`${API}/notebooks`, {
+    data: { title: `E2E daily ${Date.now()}` },
+  });
+  const notebookId = (await created.json()).id as string;
+  try {
+    await page.goto(`/notebooks/${notebookId}`);
+    await page.getByRole("button", { name: "+ SQL" }).click();
+    // date_trunc returns TIMESTAMP: the most common time chart.
+    await typeInLastEditor(
+      page,
+      "select date_trunc('day', pickup_at) as day, count(*) as trips from trips where pickup_at < '2024-02-01' group by all order by day",
+    );
+    await page.getByRole("button", { name: "Run" }).click();
+    await expect(page.getByTestId("result-summary")).toContainText("31 rows");
+    await page.getByRole("button", { name: "+ Chart" }).click();
+    await page.getByLabel("Chart data").selectOption({ index: 1 });
+    await page.getByLabel("Chart x").selectOption("day");
+    await page.getByLabel("Chart y").selectOption("trips");
+    const bars = page.getByTestId("chart").locator(".mark-rect path");
+    await expect(bars).toHaveCount(31);
+    const widths = await bars.evaluateAll((paths) =>
+      paths.map((path) => (path as SVGGraphicsElement).getBBox().width),
+    );
+    expect(Math.min(...widths)).toBeGreaterThanOrEqual(1);
+  } finally {
+    await request.delete(`${API}/notebooks/${notebookId}`);
+  }
+});

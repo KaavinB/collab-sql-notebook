@@ -119,6 +119,10 @@ export function SqlCellBody({
 }: SqlCellProps) {
   const run = useLatestRun(cell.lastRunId, runs, ensureRun);
   const loadFailure = cell.lastRunId ? loadFailures.get(cell.lastRunId) : undefined;
+  const text = useText(source);
+  // The shown result came from different SQL than what's in the editor now
+  // (edited since, or edited while a run was in flight).
+  const stale = run !== null && run.sql.trim() !== text.trim();
   return (
     <>
       <CodeEditor
@@ -127,7 +131,18 @@ export function SqlCellBody({
         placeholderText="select * from trips limit 10"
         onSubmit={onRun}
       />
-      {state.status === "running" && <p className="text-xs text-zinc-500">Running…</p>}
+      {state.status === "running" && (
+        <p className="text-xs text-zinc-500" role="status">
+          {state.ignoredSubmit
+            ? "Already running. Run again when it finishes to use your latest edits."
+            : "Running…"}
+        </p>
+      )}
+      {stale && state.status !== "running" && (
+        <p className="text-xs text-amber-700" data-testid="stale-result">
+          This result is from an earlier version of the query. Run the cell to update it.
+        </p>
+      )}
       {state.status === "failed" && (
         <p role="alert" className="text-xs text-red-600">
           {state.message}
@@ -202,8 +217,4 @@ export function MarkdownCellBody({ source }: { source: Y.Text }) {
       </button>
     </div>
   );
-}
-
-export function ChartCellBody() {
-  return <p className="text-sm text-zinc-500 italic">Chart cells arrive in the next task.</p>;
 }
