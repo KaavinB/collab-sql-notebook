@@ -19,9 +19,7 @@ export function parseApiBaseUrl(raw: string | undefined): string {
   // The value is shipped in the browser bundle and used as a prefix for paths,
   // so credentials, a query string or a fragment are always a mistake.
   if (url.username || url.password || url.search || url.hash) {
-    throw new Error(
-      "NEXT_PUBLIC_API_URL must not contain credentials, a query or a fragment",
-    );
+    throw new Error("NEXT_PUBLIC_API_URL must not contain credentials, a query or a fragment");
   }
   // Drop any trailing slash so callers can always write `${base}/path`.
   return url.toString().replace(/\/$/, "");
