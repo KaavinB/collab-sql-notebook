@@ -8,6 +8,7 @@
   "scripts": {
     "dev:web": "pnpm --filter web dev",
     "dev:api": "uv run --directory services/api --env-file ../../.env notebook-api",
+    "dev:sync": "node --env-file=.env apps/sync/src/main.ts",
     "api": "uv run --directory services/api",
     "lint": "pnpm -r lint && pnpm api ruff check . && pnpm api ruff format --check .",
     "typecheck": "pnpm -r typecheck && pnpm api mypy",

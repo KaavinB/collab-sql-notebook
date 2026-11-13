@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -202,3 +203,23 @@ class CellExecution(Base):
     )
     started_at: Mapped[datetime]
     expires_at: Mapped[datetime]
+
+
+class NotebookUpdateLogEntry(Base):
+    """One batch of Yjs document updates, appended by the sync server.
+
+    A notebook's document is its snapshot (notebook_snapshots) plus every
+    row here for it, applied in any order (Yjs updates commute). The sync
+    server is the only writer: it appends a merged batch every fraction of a
+    second while people edit, and from time to time compacts the rows into
+    the snapshot and deletes exactly the rows it merged, in one transaction.
+    """
+
+    __tablename__ = "notebook_updates"
+    __table_args__ = (Index("ix_notebook_updates_notebook_id_id", "notebook_id", "id"),)
+
+    # bigserial: a busy notebook appends a row several times a second.
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    notebook_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("notebooks.id", ondelete="CASCADE"))
+    update: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

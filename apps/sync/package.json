@@ -1,0 +1,29 @@
+{
+  "name": "sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "prettier --check .",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "lib0": "0.2.120",
+    "pg": "8.23.1",
+    "ws": "8.22.1",
+    "y-protocols": "1.0.7",
+    "yjs": "13.6.33"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@types/pg": "8.23.1",
+    "@types/ws": "8.18.2",
+    "prettier": "3.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12",
+    "y-websocket": "3.1.0"
+  }
+}
