@@ -8,6 +8,7 @@ const NOTEBOOK = {
   title: "Taxi",
   created_at: "2026-11-13T07:00:00Z",
   updated_at: "2026-11-13T07:00:00Z",
+  role: "owner",
 };
 
 function client(...responses: (Response | Error)[]) {
@@ -23,6 +24,31 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 describe("api client", () => {
+  it("sends the session cookie with every request", async () => {
+    const { api, fetchMock } = client(json([NOTEBOOK]));
+    await api.listNotebooks();
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ credentials: "include" });
+  });
+
+  it("reports a missing session as a 401 ApiError", async () => {
+    const { api } = client(
+      json({ detail: { kind: "unauthenticated", message: "Please sign in." } }, 401),
+    );
+    await expect(api.me()).rejects.toMatchObject({ status: 401, kind: "unauthenticated" });
+  });
+
+  it("builds a sign-in URL that comes back to the given path", () => {
+    const { api } = client();
+    expect(api.signInUrl("github", "/notebooks/a b")).toBe(
+      `${BASE}/auth/github/login?next=%2Fnotebooks%2Fa%20b`,
+    );
+  });
+
+  it("rejects a notebook without a known role", async () => {
+    const { api } = client(json([{ ...NOTEBOOK, role: "admin" }]));
+    await expect(api.listNotebooks()).rejects.toMatchObject({ kind: "invalid_response" });
+  });
+
   it("lists notebooks and validates them", async () => {
     const { api, fetchMock } = client(json([NOTEBOOK]));
     expect(await api.listNotebooks()).toEqual([NOTEBOOK]);

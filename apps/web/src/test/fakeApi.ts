@@ -1,13 +1,16 @@
 import { vi } from "vitest";
 
-import type { ApiClient, Notebook, Run } from "@/lib/api";
+import type { ApiClient, Notebook, Run, User } from "@/lib/api";
 
 export const NOTEBOOK: Notebook = {
   id: "4e7cec47-ee07-48e8-b7cd-3b878e00aa86",
   title: "Taxi",
   created_at: "2026-11-13T07:00:00Z",
   updated_at: "2026-11-13T07:00:00Z",
+  role: "owner",
 };
+
+export const USER: User = { id: "0b0f3c50-61c4-4b2a-9d39-5d1f2a7f3e10", name: "Ada" };
 
 export function okRun(id: string, value: unknown, cellId = "c1"): Run {
   return {
@@ -30,6 +33,13 @@ export function okRun(id: string, value: unknown, cellId = "c1"): Run {
 /** An ApiClient whose every method is a vi.fn, with harmless defaults. */
 export function fakeApi(overrides: Partial<ApiClient> = {}) {
   const api = {
+    me: vi.fn<ApiClient["me"]>(async () => USER),
+    providers: vi.fn<ApiClient["providers"]>(async () => ({ providers: [], dev_login: true })),
+    signInUrl: vi.fn<ApiClient["signInUrl"]>(
+      (provider, next) => `http://api.test/auth/${provider}/login?next=${encodeURIComponent(next)}`,
+    ),
+    devLogin: vi.fn<ApiClient["devLogin"]>(async () => USER),
+    logout: vi.fn<ApiClient["logout"]>(async () => {}),
     listNotebooks: vi.fn<ApiClient["listNotebooks"]>(async () => [NOTEBOOK]),
     createNotebook: vi.fn<ApiClient["createNotebook"]>(async () => NOTEBOOK),
     getNotebook: vi.fn<ApiClient["getNotebook"]>(async () => NOTEBOOK),

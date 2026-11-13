@@ -80,3 +80,65 @@ class CellRun(Base):
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     error: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # Shown to collaborators next to the user's cursor. From the provider's
+    # profile, refreshed at each sign-in.
+    name: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class UserIdentity(Base):
+    """A sign-in identity (GitHub user 123, Google subject abc) belonging to a user.
+
+    Users are matched by provider and the provider's own user ID, never by
+    email, so one provider's unverified email can't take over an account.
+    """
+
+    __tablename__ = "user_identities"
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('github', 'google', 'dev')", name="ck_user_identities_provider"
+        ),
+    )
+
+    provider: Mapped[str] = mapped_column(String(20), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(255), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+
+
+class AuthSession(Base):
+    """A signed-in browser. The cookie holds a random token; this row holds its SHA-256."""
+
+    __tablename__ = "auth_sessions"
+
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    expires_at: Mapped[datetime]
+
+
+class NotebookMember(Base):
+    """Who can open a notebook, and with which role."""
+
+    __tablename__ = "notebook_members"
+    __table_args__ = (
+        CheckConstraint("role IN ('owner', 'editor', 'viewer')", name="ck_notebook_members_role"),
+    )
+
+    notebook_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("notebooks.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    role: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

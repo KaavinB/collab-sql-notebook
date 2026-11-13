@@ -1,8 +1,14 @@
 """Helpers that write tiny raw files shaped exactly like the real TLC downloads."""
 
 from pathlib import Path
+from typing import Any
 
 import duckdb
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from pydantic import SecretStr
+
+from notebook_api.config import Settings
 
 # The raw TLC column names and types, as they appear in the 2024 Parquet files.
 RAW_TRIP_SCHEMA = """
@@ -64,3 +70,43 @@ def write_query_test_db(path: Path) -> Path:
             """
         )
     return path
+
+
+# --- signed-in API clients ------------------------------------------------
+
+# The web app's origin in tests (Settings' default WEB_URL and CORS origin).
+WEB_ORIGIN = "http://localhost:3000"
+TEST_AUTH_SECRET = "test-secret-" + "x" * 32
+
+
+def auth_settings(**overrides: Any) -> Settings:
+    """Settings with sign-in configured the way the tests need it.
+
+    Cookies aren't Secure, because the test client talks plain HTTP; dev
+    sign-in is on, because tests sign in by name instead of through OAuth.
+    """
+    values: dict[str, Any] = {
+        # Dev sign-in requires loopback-only hosts, as on a dev machine.
+        "api_allowed_hosts": ["localhost"],
+        "auth_secret": SecretStr(TEST_AUTH_SECRET),
+        "auth_cookie_secure": False,
+        "auth_dev_login": True,
+        **overrides,
+    }
+    return Settings(**values)
+
+
+def browser(app: FastAPI) -> TestClient:
+    """A test client that behaves like the web app's pages: it sends their
+    Origin, and calls the API as http://localhost (see auth_settings)."""
+    return TestClient(app, base_url="http://localhost", headers={"Origin": WEB_ORIGIN})
+
+
+SESSION_COOKIE = "notebook_session"  # the name when cookies aren't Secure
+
+
+def sign_in(client: TestClient, name: str = "Ada") -> dict[str, Any]:
+    response = client.post("/auth/dev-login", json={"name": name})
+    assert response.status_code == 200, response.text
+    user: dict[str, Any] = response.json()
+    return user

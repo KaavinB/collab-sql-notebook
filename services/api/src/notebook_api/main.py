@@ -3,11 +3,14 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx2
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
+from notebook_api.auth.origin_check import OriginCheckMiddleware
+from notebook_api.auth.routes import router as auth_router
 from notebook_api.body_limit import BodyLimitMiddleware
 from notebook_api.config import Settings
 from notebook_api.db.session import create_engine, make_sessionmaker
@@ -40,12 +43,17 @@ def build_query_runner(settings: Settings) -> QueryRunner | None:
     )
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    oauth_transport: httpx2.AsyncBaseTransport | None = None,
+) -> FastAPI:
+    """The app. `oauth_transport` replaces the network for OAuth calls (tests)."""
     settings = settings or Settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.settings = settings
+        app.state.oauth_transport = oauth_transport
         engine = create_engine(settings.database_url) if settings.database_url else None
         app.state.sessions = make_sessionmaker(engine) if engine else None
         runner = build_query_runner(settings)
@@ -68,21 +76,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_bytes=settings.api_max_body_bytes,
         snapshot_max_bytes=settings.snapshot_max_bytes,
     )
+    # The middleware added last runs first: CORS, then the Host check, then
+    # the Origin check, then the body cap. CORS is outermost so even refusals
+    # carry CORS headers and the web app can read their message.
+    app.add_middleware(OriginCheckMiddleware, allowed_origins=settings.api_cors_origins)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.api_allowed_hosts)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.api_cors_origins,
+        # The session cookie must be sent and accepted on cross-origin calls
+        # from the web app. Safe only because origins are listed explicitly.
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Content-Type"],
     )
-
-    install_error_handlers(app)
 
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    app.include_router(auth_router)
     app.include_router(notebooks_router)
+    install_error_handlers(app)  # last: it reads the finished route schema
     return app
 
 

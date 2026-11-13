@@ -3,7 +3,16 @@
 FastAPI's defaults differ: a 422 lists every error with the rejected input
 attached, and errors raised by the framework (a body that isn't UTF-8, an
 unknown route, a wrong method) carry a bare string. The handlers here give
-every error the same shape, so the client can always show `message`.
+those, and unexpected server errors (500), the same shape, so the client
+can always show `message`.
+
+Not covered: requests refused by middleware before the app runs, namely an
+unknown Host header (TrustedHostMiddleware) and a CORS preflight from an
+origin that isn't allowed. Those answer in plain text; neither comes from
+the web app, which always uses an allowed host and origin. Also, a 500 is
+produced outside the CORS middleware, so it has no CORS headers: the
+browser hides its body from the web app, which shows a generic network
+error instead. The body is still the standard shape for other clients.
 
 A 422 message is built only from text this app controls: field names it
 declared (read from its own OpenAPI schema) and a fixed phrase per error
@@ -16,7 +25,8 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Where an error can be: FastAPI's first `loc` element.
@@ -39,15 +49,21 @@ _PHRASES: Mapping[str, str] = {
     "model_attributes_type": "must be a JSON object",
     "dict_type": "must be a JSON object",
     "list_type": "must be a list",
+    "too_short": "has too few items",
+    "too_long": "has too many items",
     "literal_error": "is not one of the allowed values",
     "enum": "is not one of the allowed values",
 }
 
 # Limits in pydantic's error context come from our schema, not the input.
-_LIMIT_PHRASES: Mapping[str, str] = {
-    "min_length": "at least {} characters",
-    "max_length": "at most {} characters",
+# The unit depends on what was measured: text length or a list's items.
+_LIMIT_UNITS: Mapping[str, str] = {
+    "string_too_short": "character",
+    "string_too_long": "character",
+    "too_short": "item",
+    "too_long": "item",
 }
+_LIMIT_WORDS: Mapping[str, str] = {"min_length": "at least", "max_length": "at most"}
 
 _KIND_BY_STATUS: Mapping[int, str] = {
     400: "bad_request",
@@ -88,12 +104,16 @@ def describe_validation_errors(errors: Iterable[Mapping[str, Any]], allowed: fro
             else:
                 parts.append("*")
         where = ".".join(parts) or "request"
-        phrase = _PHRASES.get(str(error.get("type", "")), "is invalid")
+        error_type = str(error.get("type", ""))
+        phrase = _PHRASES.get(error_type, "is invalid")
+        unit = _LIMIT_UNITS.get(error_type)
         context = error.get("ctx") or {}
         limits = [
-            template.format(value)
-            for key, template in _LIMIT_PHRASES.items()
-            if isinstance(value := context.get(key), int) and not isinstance(value, bool)
+            f"{words} {value} {unit}{'' if value == 1 else 's'}"
+            for key, words in _LIMIT_WORDS.items()
+            if unit is not None
+            and isinstance(value := context.get(key), int)
+            and not isinstance(value, bool)
         ]
         if limits:
             phrase += f" ({', '.join(limits)})"
@@ -112,17 +132,23 @@ def _error(
 
 
 def install_error_handlers(app: FastAPI) -> None:
-    allowed: frozenset[str] | None = None
+    """Install the handlers. Call after every route is registered.
+
+    The 422 allowlist is read from the app's OpenAPI schema here, at
+    startup, so a route whose schema can't be generated fails at boot
+    instead of turning every later validation error into a 500.
+    """
+    allowed = declared_names(app.openapi())
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, error: RequestValidationError) -> JSONResponse:
-        nonlocal allowed
-        if allowed is None:  # the schema is complete once routes are registered
-            allowed = declared_names(app.openapi())
         return _error(422, "invalid", describe_validation_errors(error.errors(), allowed))
 
     @app.exception_handler(StarletteHTTPException)
-    async def http_error(request: Request, error: StarletteHTTPException) -> JSONResponse:
+    async def http_error(request: Request, error: StarletteHTTPException) -> Response:
+        if not is_body_allowed_for_status_code(error.status_code):
+            # 204 and 304 must not have a body at all.
+            return Response(status_code=error.status_code, headers=error.headers)
         detail = error.detail
         if (
             isinstance(detail, Mapping)
@@ -135,3 +161,10 @@ def install_error_handlers(app: FastAPI) -> None:
         # an error parsing the body"): those never contain input.
         kind = _KIND_BY_STATUS.get(error.status_code, "http_error")
         return _error(error.status_code, kind, str(detail), error.headers)
+
+    @app.exception_handler(Exception)
+    async def server_error(request: Request, error: Exception) -> JSONResponse:
+        # Starlette still logs the exception (with its traceback) and re-raises
+        # it to the server after this response is sent; the client only gets
+        # a generic message, never internals.
+        return _error(500, "internal", "Something went wrong on the server.")

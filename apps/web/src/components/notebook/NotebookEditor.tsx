@@ -30,6 +30,7 @@ import {
   type SaveStateStore,
 } from "@/lib/notebook/saveStatus";
 import { useCells } from "@/lib/notebook/useCells";
+import { trackPendingWork } from "@/lib/pendingWork";
 
 type Loaded = { doc: Y.Doc; notebook: Notebook };
 
@@ -101,6 +102,8 @@ export function NotebookEditor({
           if (pendingFlushes.get(notebookId) === flushed) pendingFlushes.delete(notebookId);
         });
       pendingFlushes.set(notebookId, flushed);
+      // Signing out waits for this save before ending the session.
+      trackPendingWork(flushed);
     };
   }, [api, notebookId, saveState]);
 

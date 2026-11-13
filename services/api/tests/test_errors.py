@@ -1,16 +1,18 @@
 """Error response shape and the no-echo rule for validation messages."""
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from notebook_api.config import Settings
 from notebook_api.errors import declared_names, describe_validation_errors
 from notebook_api.main import create_app
+from tests.fixtures import browser
 
 ALLOWED = frozenset({"sql", "title", "notebook_id"})
 
 
 def _client() -> TestClient:
-    return TestClient(create_app(Settings(api_allowed_hosts=["testserver"])))
+    return browser(create_app(Settings()))
 
 
 def test_declared_names_come_from_the_apps_own_schema() -> None:
@@ -89,3 +91,49 @@ def test_framework_errors_get_the_standard_shape_and_keep_their_headers() -> Non
     assert wrong_method.status_code == 405
     assert wrong_method.json()["detail"]["kind"] == "method_not_allowed"
     assert wrong_method.headers["allow"] == "GET"
+
+
+def test_limit_wording_matches_the_unit_and_count() -> None:
+    message = describe_validation_errors(
+        [
+            {"loc": ("body", "title"), "type": "string_too_short", "ctx": {"min_length": 1}},
+            {"loc": ("body", "title"), "type": "too_long", "ctx": {"max_length": 5}},
+            # A limit on a type that isn't about length isn't described as one.
+            {"loc": ("body", "title"), "type": "greater_than", "ctx": {"max_length": 5}},
+        ],
+        ALLOWED,
+    )
+    assert message == (
+        "Invalid request: body.title is too short (at least 1 character); "
+        "body.title has too many items (at most 5 items); body.title is invalid."
+    )
+
+
+def test_unexpected_errors_are_a_generic_500_in_the_standard_shape() -> None:
+    app = create_app(Settings(api_allowed_hosts=["testserver"]))
+
+    @app.get("/boom")
+    def boom() -> None:
+        raise RuntimeError("internal detail: /srv/secret/path")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/boom")
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": {"kind": "internal", "message": "Something went wrong on the server."}
+    }
+    assert "secret" not in response.text
+
+
+def test_statuses_without_a_body_get_none() -> None:
+    app = create_app(Settings(api_allowed_hosts=["testserver"]))
+
+    @app.get("/unchanged")
+    def unchanged() -> None:
+        raise HTTPException(status_code=304, headers={"ETag": '"v1"'})
+
+    with TestClient(app) as client:
+        response = client.get("/unchanged")
+    assert response.status_code == 304
+    assert response.content == b""
+    assert response.headers["etag"] == '"v1"'

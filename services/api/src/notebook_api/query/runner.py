@@ -16,6 +16,7 @@ attached, so a reply larger than the pipe buffer then fails to read.)
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
@@ -74,6 +75,20 @@ def _start_process(fd: int) -> subprocess.Popen[bytes]:
         pass_fds=(fd,),  # every other descriptor is closed in the child
         stdin=subprocess.DEVNULL,
     )
+
+
+def _launch(child_conn: Connection) -> subprocess.Popen[bytes]:
+    """Blocking: start the worker, then close the parent's copy of its socket end.
+
+    The close happens here, on the same thread and after Popen returns, so
+    it can never run while Popen is still handing that descriptor to the
+    child (closing it early could pass the child an unrelated file that
+    reused the number).
+    """
+    try:
+        return _start_process(child_conn.fileno())
+    finally:
+        child_conn.close()
 
 
 FailureKind = Literal["timeout", "error", "busy", "crashed"]
@@ -254,9 +269,12 @@ class QueryRunner:
         spill_dir.mkdir()
         parent_conn, child_conn = Pipe()
         process: subprocess.Popen[bytes] | None = None
+        launching: asyncio.Future[subprocess.Popen[bytes]] | None = None
         try:
-            process = await asyncio.to_thread(_start_process, child_conn.fileno())
-            child_conn.close()  # the parent keeps only its own end
+            # Shielded: fork + exec can't be interrupted, so cancelling this
+            # task must not abandon a process that is about to exist.
+            launching = asyncio.ensure_future(asyncio.to_thread(_launch, child_conn))
+            process = await asyncio.shield(launching)
             config = {
                 "db_path": str(self._db_path),
                 "spill_dir": str(spill_dir),
@@ -274,11 +292,19 @@ class QueryRunner:
             if not hello.get("ready"):
                 raise WorkerStartError(f"query worker failed to start: {hello.get('message')}")
         except BaseException:
-            # If the process never started, the child's end of the pipe was
-            # never closed; close it here, or retries under fd exhaustion
-            # (EMFILE) would leak another descriptor each time.
-            child_conn.close()
-            await asyncio.to_thread(_stop, process, parent_conn, spill_dir)
+            if launching is None:
+                child_conn.close()  # _launch never ran, so it never closed it
+            elif process is None:
+                # Cancelled (or failed) while the process was starting: wait
+                # for the start to finish, so a process that did start is
+                # killed and reaped below instead of leaking. Shielded and
+                # retried, because shutdown can cancel this wait too.
+                while not launching.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(launching)
+                if not launching.cancelled() and launching.exception() is None:
+                    process = launching.result()
+            await asyncio.shield(asyncio.to_thread(_stop, process, parent_conn, spill_dir))
             raise
         return _Worker(process=process, conn=parent_conn, spill_dir=spill_dir)
 

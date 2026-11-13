@@ -18,13 +18,30 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 // the client gives up on a run the server still completes and stores.
 const RUN_TIMEOUT_MS = 60_000;
 
+export const ROLES = ["owner", "editor", "viewer"] as const;
+export type Role = (typeof ROLES)[number];
+
 export const notebookSchema = z.object({
   id: z.uuid(),
   title: z.string(),
   created_at: z.string(),
   updated_at: z.string(),
+  /** The signed-in user's role in this notebook. */
+  role: z.enum(ROLES),
 });
 export type Notebook = z.infer<typeof notebookSchema>;
+
+export const userSchema = z.object({ id: z.uuid(), name: z.string() });
+export type User = z.infer<typeof userSchema>;
+
+export const PROVIDERS = ["github", "google"] as const;
+export type ProviderName = (typeof PROVIDERS)[number];
+
+const providersSchema = z.object({
+  providers: z.array(z.enum(PROVIDERS)),
+  dev_login: z.boolean(),
+});
+export type Providers = z.infer<typeof providersSchema>;
 
 const jsonValue: z.ZodType<unknown> = z.lazy(() =>
   z.union([
@@ -105,6 +122,9 @@ export function createApiClient(options: ApiClientOptions = {}) {
       const timeout = AbortSignal.timeout(timeoutMs);
       response = await fetchImpl(url, {
         ...rest,
+        // Send and accept the session cookie. The API is another origin
+        // (another port in dev, another subdomain in production).
+        credentials: "include",
         // The caller's signal (to cancel) and the timeout both apply.
         signal: rest.signal ? AbortSignal.any([rest.signal, timeout]) : timeout,
       });
@@ -140,6 +160,27 @@ export function createApiClient(options: ApiClientOptions = {}) {
   });
 
   return {
+    /** The signed-in user. Rejects with a 401 ApiError when signed out. */
+    async me(): Promise<User> {
+      return json(userSchema, await request("/auth/me"));
+    },
+    async providers(): Promise<Providers> {
+      return json(providersSchema, await request("/auth/providers"));
+    },
+    /** Where to send the browser to sign in; it comes back to `next` (a path). */
+    signInUrl(provider: ProviderName, next: string): string {
+      return `${base()}/auth/${provider}/login?next=${encodeURIComponent(next)}`;
+    },
+    /** Development sign-in by name. The server only allows it when configured to. */
+    async devLogin(name: string): Promise<User> {
+      return json(
+        userSchema,
+        await request("/auth/dev-login", { method: "POST", ...jsonBody({ name }) }),
+      );
+    },
+    async logout(): Promise<void> {
+      await request("/auth/logout", { method: "POST" });
+    },
     async listNotebooks(): Promise<Notebook[]> {
       return json(z.array(notebookSchema), await request("/notebooks"));
     },

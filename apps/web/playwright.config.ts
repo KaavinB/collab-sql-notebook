@@ -15,10 +15,13 @@ import { defineConfig } from "@playwright/test";
 const WEB_PORT = 3100;
 const API_PORT = 8100;
 const WEB_URL = `http://localhost:${WEB_PORT}`;
-const API_URL = `http://127.0.0.1:${API_PORT}`;
+// localhost, like the web app: the session cookie is SameSite=Lax, and
+// 127.0.0.1 would be a different site from localhost.
+const API_URL = `http://localhost:${API_PORT}`;
 
 // Read by the specs (Playwright workers inherit this process's environment).
 process.env.E2E_API_URL = API_URL;
+process.env.E2E_WEB_URL = WEB_URL;
 
 export default defineConfig({
   testDir: "e2e",
@@ -30,13 +33,20 @@ export default defineConfig({
   webServer: [
     {
       command: "pnpm --dir ../.. dev:api",
-      url: `${API_URL}/health`,
+      url: `http://127.0.0.1:${API_PORT}/health`,
       // Real environment variables take precedence over the shared .env.
       env: {
         API_RELOAD: "false",
         API_PORT: String(API_PORT),
         API_CORS_ORIGINS: WEB_URL,
         API_ALLOWED_HOSTS: "127.0.0.1,localhost",
+        WEB_URL,
+        API_PUBLIC_URL: API_URL,
+        // Tests sign in by name. A fixed secret is fine: it only signs OAuth
+        // flow cookies on this throwaway local server.
+        AUTH_SECRET: "e2e-only-secret-not-used-anywhere-else-0123456789",
+        AUTH_DEV_LOGIN: "true",
+        AUTH_COOKIE_SECURE: "false",
       },
       reuseExistingServer: false,
       timeout: 60_000,

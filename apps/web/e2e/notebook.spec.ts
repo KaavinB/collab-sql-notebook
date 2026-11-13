@@ -2,6 +2,33 @@ import { expect, test, type Page } from "@playwright/test";
 
 // Set by playwright.config.ts, which starts the API on its own port.
 const API = process.env.E2E_API_URL!;
+const WEB = process.env.E2E_WEB_URL!;
+
+/**
+ * API calls made with the page's own request context, which shares the
+ * browser's cookies: signing in here signs the page in too. State-changing
+ * calls carry the web app's Origin, as the browser's would.
+ */
+const api = {
+  async signIn(page: Page, name = "E2E User") {
+    const response = await page.request.post(`${API}/auth/dev-login`, {
+      data: { name },
+      headers: { Origin: WEB },
+    });
+    expect(response.ok()).toBe(true);
+  },
+  async createNotebook(page: Page, title: string): Promise<string> {
+    const response = await page.request.post(`${API}/notebooks`, {
+      data: { title },
+      headers: { Origin: WEB },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).id as string;
+  },
+  async deleteNotebook(page: Page, id: string) {
+    await page.request.delete(`${API}/notebooks/${id}`, { headers: { Origin: WEB } });
+  },
+};
 
 async function typeInLastEditor(page: Page, text: string) {
   const editor = page.locator(".cm-content").last();
@@ -9,12 +36,15 @@ async function typeInLastEditor(page: Page, text: string) {
   await page.keyboard.type(text);
 }
 
-test("create a notebook, run SQL, write markdown, and find it all after a reload", async ({
+test("sign in, create a notebook, run SQL, write markdown, and find it all after a reload", async ({
   page,
-  request,
 }) => {
   const title = `E2E ${Date.now()}`;
   await page.goto("/");
+  // Signed out: the sign-in page, then the dev sign-in form.
+  await page.getByLabel("Dev user name").fill("E2E User");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByTestId("signed-in-as")).toHaveText("E2E User");
   await page.getByLabel("New notebook title").fill(title);
   await page.getByRole("button", { name: "Create" }).click();
   await expect(page).toHaveURL(/\/notebooks\/[0-9a-f-]{36}$/);
@@ -85,24 +115,23 @@ test("create a notebook, run SQL, write markdown, and find it all after a reload
     await expect(page.getByRole("link", { name: renamed })).toHaveCount(0);
     await page.reload();
     await expect(page.getByRole("link", { name: renamed })).toHaveCount(0);
-    expect((await request.get(`${API}/notebooks/${notebookId}`)).status()).toBe(404);
+    expect((await page.request.get(`${API}/notebooks/${notebookId}`)).status()).toBe(404);
   } finally {
-    await request.delete(`${API}/notebooks/${notebookId}`);
+    await api.deleteNotebook(page, notebookId);
   }
 });
 
 test("an unknown notebook shows an error with a way back", async ({ page }) => {
+  await api.signIn(page);
   await page.goto("/notebooks/00000000-0000-4000-8000-000000000000");
   // Next.js adds its own (empty) role="alert" route announcer, so match the text.
   await expect(page.getByRole("alert").filter({ hasText: "Notebook not found." })).toBeVisible();
   await expect(page.getByRole("link", { name: "Back to notebooks" })).toBeVisible();
 });
 
-test("chart a SQL cell's result, and the chart survives a reload", async ({ page, request }) => {
-  const created = await request.post(`${API}/notebooks`, {
-    data: { title: `E2E chart ${Date.now()}` },
-  });
-  const notebookId = (await created.json()).id as string;
+test("chart a SQL cell's result, and the chart survives a reload", async ({ page }) => {
+  await api.signIn(page);
+  const notebookId = await api.createNotebook(page, `E2E chart ${Date.now()}`);
   try {
     await page.goto(`/notebooks/${notebookId}`);
     await page.getByRole("button", { name: "+ SQL" }).click();
@@ -128,15 +157,13 @@ test("chart a SQL cell's result, and the chart survives a reload", async ({ page
     await expect(page.getByLabel("Chart x")).toHaveValue("payment_type");
     await expect(page.getByTestId("chart").locator(".mark-rect path")).toHaveCount(rows);
   } finally {
-    await request.delete(`${API}/notebooks/${notebookId}`);
+    await api.deleteNotebook(page, notebookId);
   }
 });
 
-test("a bar chart over daily timestamps draws visible bars", async ({ page, request }) => {
-  const created = await request.post(`${API}/notebooks`, {
-    data: { title: `E2E daily ${Date.now()}` },
-  });
-  const notebookId = (await created.json()).id as string;
+test("a bar chart over daily timestamps draws visible bars", async ({ page }) => {
+  await api.signIn(page);
+  const notebookId = await api.createNotebook(page, `E2E daily ${Date.now()}`);
   try {
     await page.goto(`/notebooks/${notebookId}`);
     await page.getByRole("button", { name: "+ SQL" }).click();
@@ -158,19 +185,13 @@ test("a bar chart over daily timestamps draws visible bars", async ({ page, requ
     );
     expect(Math.min(...widths)).toBeGreaterThanOrEqual(1);
   } finally {
-    await request.delete(`${API}/notebooks/${notebookId}`);
+    await api.deleteNotebook(page, notebookId);
   }
 });
 
-test("chart tooltips show image URLs as text without requesting them", async ({
-  page,
-  request,
-}) => {
-  const created = await request.post(`${API}/notebooks`, {
-    data: { title: `E2E tooltip ${Date.now()}` },
-  });
-  expect(created.status()).toBe(201);
-  const notebookId = (await created.json()).id as string;
+test("chart tooltips show image URLs as text without requesting them", async ({ page }) => {
+  await api.signIn(page);
+  const notebookId = await api.createNotebook(page, `E2E tooltip ${Date.now()}`);
   const url = "https://tracker.example/pixel.png";
   const trackerRequests: string[] = [];
   // Intercept the host so a regression can never send a real tracking request.
@@ -197,6 +218,6 @@ test("chart tooltips show image URLs as text without requesting them", async ({
     await expect(tooltip.locator("img, iframe, script")).toHaveCount(0);
     expect(trackerRequests).toEqual([]);
   } finally {
-    await request.delete(`${API}/notebooks/${notebookId}`);
+    await api.deleteNotebook(page, notebookId);
   }
 });

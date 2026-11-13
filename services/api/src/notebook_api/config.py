@@ -5,10 +5,12 @@ In production the platform sets real environment variables. The app never
 looks for a .env file itself, so it behaves the same however it's installed.
 """
 
+import ipaddress
 from pathlib import Path
 from typing import Annotated, Self
+from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -16,8 +18,8 @@ class Settings(BaseSettings):
     # The shared .env also holds web and Postgres variables; ignore unknown ones.
     model_config = SettingsConfigDict(extra="ignore")
 
-    # Localhost by default: Phase 1 has no auth, so the API must not be reachable
-    # from the network unless a deployment explicitly sets API_HOST.
+    # Localhost by default, so a dev machine never exposes the API to its
+    # network. A deployment sets API_HOST explicitly.
     api_host: str = "127.0.0.1"
     api_port: int = 8010
     # Auto-reload on file changes. Dev only; off unless API_RELOAD=true.
@@ -68,6 +70,78 @@ class Settings(BaseSettings):
     # malicious page points its own domain at 127.0.0.1 to reach this API.
     api_allowed_hosts: Annotated[list[str], NoDecode] = ["127.0.0.1", "localhost"]
 
+    # --- Auth ---
+    # The web app's origin. Users land here after signing in; it must be one
+    # of API_CORS_ORIGINS.
+    web_url: str = "http://localhost:3000"
+    # This API's URL as browsers reach it. OAuth callback URLs are built from
+    # it, and must match what's registered with GitHub and Google.
+    api_public_url: str = "http://localhost:8010"
+    # Signs the short-lived OAuth flow cookie. At least 32 characters; unset
+    # means sign-in answers 503. Generate one with `openssl rand -hex 32`.
+    auth_secret: SecretStr | None = None
+    # Mark the session cookie Secure (HTTPS only). Only a plain-HTTP dev setup
+    # turns this off.
+    auth_cookie_secure: bool = True
+    session_days: int = Field(default=30, ge=1, le=365)
+    # OAuth apps. A provider is offered only when both of its values are set.
+    github_client_id: str | None = None
+    github_client_secret: SecretStr | None = None
+    google_client_id: str | None = None
+    google_client_secret: SecretStr | None = None
+    # Sign in by typing a name, with no provider: for e2e tests and local
+    # development only. Refused unless the API listens on loopback only.
+    auth_dev_login: bool = False
+
+    @field_validator("web_url", "api_public_url")
+    @classmethod
+    def _bare_origin_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("must be an http(s) URL")
+        if parts.query or parts.fragment or parts.username or parts.password:
+            raise ValueError("must not contain credentials, a query or a fragment")
+        return value.rstrip("/")
+
+    @field_validator("auth_secret")
+    @classmethod
+    def _long_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value()) < 32:
+            raise ValueError("AUTH_SECRET must be at least 32 characters")
+        return value
+
+    @model_validator(mode="after")
+    def _web_url_is_an_allowed_origin(self) -> Self:
+        if self.web_url not in self.api_cors_origins:
+            raise ValueError("WEB_URL must be one of API_CORS_ORIGINS")
+        return self
+
+    @model_validator(mode="after")
+    def _dev_login_only_on_loopback(self) -> Self:
+        """Dev sign-in only for a server nobody else can reach.
+
+        API_HOST alone isn't proof: `uvicorn --host 0.0.0.0` or a reverse
+        proxy bypasses it. So every name the server answers to (the Host
+        allowlist), the web app's URL and the API's public URL must all be
+        loopback too (a deployment can't work without its public host in
+        those), and cookies must be the plain-HTTP dev kind.
+        """
+        if not self.auth_dev_login:
+            return self
+        hosts = [
+            self.api_host,
+            *self.api_allowed_hosts,
+            urlsplit(self.web_url).hostname or "",
+            urlsplit(self.api_public_url).hostname or "",
+        ]
+        if not all(_is_loopback(host) for host in hosts) or self.auth_cookie_secure:
+            raise ValueError(
+                "AUTH_DEV_LOGIN lets anyone create and use test accounts without a "
+                "provider; it requires API_HOST, API_ALLOWED_HOSTS, WEB_URL and "
+                "API_PUBLIC_URL to be loopback-only and AUTH_COOKIE_SECURE=false"
+            )
+        return self
+
     @model_validator(mode="after")
     def _memory_cap_above_duckdb_limit(self) -> Self:
         if self.query_process_memory_cap_mb <= self.query_memory_limit_mb:
@@ -98,3 +172,12 @@ class Settings(BaseSettings):
         if "*" in origins:
             raise ValueError("API_CORS_ORIGINS must list explicit origins, not '*'")
         return origins
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False

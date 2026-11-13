@@ -3,8 +3,10 @@
 import asyncio
 import json
 import multiprocessing
+import subprocess
 import sys
 import threading
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -211,10 +213,63 @@ async def test_workers_start_with_a_clean_environment(
         await pool.close()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/<pid>/environ (Linux only)")
+async def test_a_real_workers_initial_environment_block_holds_no_secrets(
+    query_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real worker command, read from outside the process: this is the
+    # environment block code inside the worker could still find, even after
+    # changing os.environ.
+    monkeypatch.setenv("DATABASE_URL", "private-database-credential")
+    pool = _runner(query_db, tmp_path / "spill", workers=1)
+    await pool.start()
+    try:
+        (worker,) = pool._all
+        block = await asyncio.to_thread(Path(f"/proc/{worker.process.pid}/environ").read_bytes)
+        assert b"private-database-credential" not in block
+        names = {entry.split(b"=", 1)[0].decode() for entry in block.split(b"\0") if entry}
+        assert names <= runner_module.WORKER_ENV_NAMES
+    finally:
+        await pool.close()
+
+
 def test_the_real_worker_command_runs_isolated() -> None:
-    command = runner_module.worker_command(7)
-    assert command[:4] == [sys.executable, "-I", "-m", "notebook_api.query.worker"]
-    assert command[4] == "7"
+    # -I matters: without it, PYTHONPATH or a stray file in the working
+    # directory could put other code into the process that runs user SQL.
+    assert runner_module.worker_command(7) == [
+        sys.executable,
+        "-I",
+        "-m",
+        "notebook_api.query.worker",
+        "7",
+    ]
+
+
+async def test_cancelling_a_start_mid_launch_reaps_the_new_process(
+    query_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[subprocess.Popen[bytes]] = []
+    real_start = runner_module._start_process
+
+    def slow_start(fd: int) -> subprocess.Popen[bytes]:
+        time.sleep(0.3)  # still launching when the task is cancelled
+        process = real_start(fd)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(runner_module, "_start_process", slow_start)
+    pool = _runner(query_db, tmp_path / "spill", workers=1)
+    task = asyncio.create_task(pool.start())
+    await asyncio.sleep(0.1)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    task.cancel()  # a second cancel (e.g. shutdown) while waiting for the launch
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The process that was mid-launch was still started, then killed and reaped.
+    assert len(started) == 1
+    assert started[0].returncode is not None
+    assert list((tmp_path / "spill").glob("worker-*")) == []
 
 
 async def test_a_cancelled_request_never_leaks_its_result_to_the_next_one(

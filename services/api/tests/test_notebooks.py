@@ -19,13 +19,14 @@ from notebook_api.main import create_app
 from notebook_api.notebooks.routes import RUNS_KEPT_PER_CELL
 from notebook_api.query.runner import QueryFailedError
 from notebook_api.query.validate import MAX_SQL_CHARS
+from tests.fixtures import auth_settings, browser, sign_in
 
 SNAPSHOT_MAX = 2_000
 
 
 @pytest.fixture
 def client(clean_db: str, query_db: Path, tmp_path: Path) -> Iterator[TestClient]:
-    settings = Settings(
+    settings = auth_settings(
         database_url=clean_db,
         duckdb_path=query_db,
         query_spill_dir=tmp_path / "spill",
@@ -33,9 +34,9 @@ def client(clean_db: str, query_db: Path, tmp_path: Path) -> Iterator[TestClient
         query_row_limit=50,
         query_timeout_seconds=0.5,
         snapshot_max_bytes=SNAPSHOT_MAX,
-        api_allowed_hosts=["testserver"],
     )
-    with TestClient(create_app(settings)) as test_client:
+    with browser(create_app(settings)) as test_client:
+        sign_in(test_client)
         yield test_client
 
 
@@ -547,8 +548,9 @@ def test_a_large_result_is_stored_and_returned(client: TestClient) -> None:
 
 
 def test_running_a_cell_answers_503_without_a_query_engine(clean_db: str) -> None:
-    settings = Settings(database_url=clean_db, duckdb_path=None, api_allowed_hosts=["testserver"])
-    with TestClient(create_app(settings)) as no_engine:
+    settings = auth_settings(database_url=clean_db, duckdb_path=None)
+    with browser(create_app(settings)) as no_engine:
+        sign_in(no_engine)
         notebook_id = _create(no_engine)["id"]
         response = no_engine.post(
             f"/notebooks/{notebook_id}/cells/c1/runs", json={"sql": "select 1"}

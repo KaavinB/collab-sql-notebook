@@ -17,7 +17,19 @@ API_ROOT = Path(__file__).resolve().parents[1]
 _TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 _DATABASE_URL = os.environ.get("DATABASE_URL")
 
-_APP_ENV_PREFIXES = ("API_", "QUERY_", "DUCKDB_", "DATABASE_", "SNAPSHOT_")
+_APP_ENV_PREFIXES = (
+    "API_",
+    "QUERY_",
+    "DUCKDB_",
+    "DATABASE_",
+    "SNAPSHOT_",
+    "AUTH_",
+    "SESSION_",
+    "WEB_",
+    "GITHUB_",
+    "GOOGLE_",
+    "SYNC_",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -96,5 +108,5 @@ def pg_url() -> str:
 def clean_db(pg_url: str) -> Iterator[str]:
     sync_url = make_url(pg_url).set(drivername="postgresql").render_as_string(hide_password=False)
     with psycopg.connect(sync_url, autocommit=True) as conn:
-        conn.execute("TRUNCATE notebooks CASCADE")
+        conn.execute("TRUNCATE notebooks, users CASCADE")
     yield pg_url

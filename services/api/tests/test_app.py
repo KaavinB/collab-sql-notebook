@@ -53,6 +53,7 @@ def test_cors_preflight_rejects_unlisted_origin() -> None:
 
 def test_cors_origins_parse_from_comma_separated_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("API_CORS_ORIGINS", "http://a.test, http://b.test ,")
+    monkeypatch.setenv("WEB_URL", "http://b.test")
     assert Settings().api_cors_origins == ["http://a.test", "http://b.test"]
 
 
