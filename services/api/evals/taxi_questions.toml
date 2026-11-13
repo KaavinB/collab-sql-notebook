@@ -1,0 +1,63 @@
+# Taxi questions for the text-to-SQL eval (the notebook's own dataset).
+#
+# Write one [[questions]] table per question. The eval asks the AI assistant
+# each question, runs its SQL and your gold_sql on taxi.duckdb, and counts
+# the answer correct when both return the same set of rows (row order,
+# duplicate rows and column names don't matter).
+#
+# Fields:
+#   id         required. Unique; 1-64 characters of a-z, 0-9, '-' and '_'.
+#              Keep it stable: results and reruns refer to it.
+#   question   required. Plain English, as a notebook user would type it
+#              (at most 2000 characters). Each question must be different.
+#   gold_sql   required. A DuckDB SELECT that answers it. It must run on
+#              taxi.duckdb under the notebook's query rules (one read-only
+#              statement); loading the file checks this and refuses the
+#              whole file if any gold query fails.
+#   difficulty required. "simple", "moderate" or "challenging" (the same
+#              labels BIRD uses, so the report can break results down by them).
+#   notes      optional. Anything worth remembering: what makes the
+#              question tricky, an assumption the gold SQL makes.
+#   example    optional, default false. true marks a format example: it is
+#              validated like the others but never scored.
+#
+# Tables: trips (one row per yellow-taxi trip: pickup_at, dropoff_at,
+# passenger_count, trip_distance, pickup_location_id, dropoff_location_id,
+# payment_type, fare_amount, tip_amount, total_amount, ...) and zones
+# (location_id, borough, zone, service_zone).
+#
+# Check the file without running the model:
+#   pnpm eval check-taxi
+#
+# Until this file has questions other than the two examples, the eval
+# report says the taxi score is not measured yet.
+
+# --- EXAMPLE (never scored) -------------------------------------------------
+[[questions]]
+id = "example-trips-per-borough"
+example = true
+question = "How many trips started in each borough?"
+gold_sql = """
+SELECT z.borough, count(*) AS trips
+FROM trips t JOIN zones z ON t.pickup_location_id = z.location_id
+GROUP BY z.borough
+"""
+difficulty = "simple"
+notes = "Format example only."
+
+# --- EXAMPLE (never scored) -------------------------------------------------
+[[questions]]
+id = "example-average-tip-share"
+example = true
+question = "What is the average tip as a share of the fare for card payments, by month of pickup?"
+gold_sql = """
+SELECT date_trunc('month', pickup_at) AS month,
+       avg(tip_amount / fare_amount) AS avg_tip_share
+FROM trips
+WHERE payment_type = 1 AND fare_amount > 0
+GROUP BY month
+"""
+difficulty = "moderate"
+notes = "Format example only. payment_type 1 is a credit card in the TLC data dictionary."
+
+# --- Your questions go below this line --------------------------------------
