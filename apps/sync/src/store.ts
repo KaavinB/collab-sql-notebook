@@ -13,6 +13,7 @@
 import pg from "pg";
 import * as Y from "yjs";
 
+import type { AiKind } from "./notify.ts";
 import type { Role } from "./ticket.ts";
 
 export class NotebookGoneError extends Error {
@@ -39,6 +40,72 @@ export interface LoadedDocument {
 export interface StoredRun {
   id: string;
   at: number;
+}
+
+export type SuggestionStatus = "pending" | "accepted" | "rejected";
+
+/** A row of ai_suggestions, with the name of whoever asked (null if they're gone). */
+export interface StoredSuggestion {
+  id: string;
+  cellId: string;
+  requestId: string;
+  kind: AiKind;
+  status: SuggestionStatus;
+  sql: string | null;
+  explanation: string;
+  baseSql: string | null;
+  valid: boolean;
+  by: string | null;
+}
+
+/** What became of AI requests and suggestions the document shows (see aiOutcomes). */
+export interface AiOutcomes {
+  /** Per request: its status, and whether it started over AI_STALE_AFTER ago (database clock). */
+  requests: Map<string, { status: string; stale: boolean }>;
+  /** Per request: its newest suggestion, whatever its status. */
+  byRequest: Map<string, StoredSuggestion>;
+  /** Per suggestion shown: its current status. Missing means the row is gone. */
+  suggestions: Map<string, SuggestionStatus>;
+}
+
+/**
+ * A request still 'running' after this long is taken to have died with its
+ * API process (the document would otherwise show the AI thinking forever).
+ */
+export const AI_STALE_AFTER_MS = 2 * 60 * 1000;
+
+const SUGGESTION_COLUMNS = `s.id::text AS id, s.cell_id, s.request_id::text AS request_id, s.kind,
+  s.status, s.sql, s.explanation, s.base_sql, s.valid, u.name AS by`;
+const SUGGESTION_FROM = `ai_suggestions s
+  JOIN ai_requests r ON r.id = s.request_id
+  LEFT JOIN users u ON u.id = r.user_id`;
+
+interface SuggestionRow {
+  id: string;
+  cell_id: string;
+  request_id: string;
+  kind: AiKind;
+  status: SuggestionStatus;
+  sql: string | null;
+  explanation: string;
+  base_sql: string | null;
+  valid: boolean;
+  by: string | null;
+}
+
+function toSuggestion(row: SuggestionRow): StoredSuggestion {
+  return {
+    id: row.id,
+    cellId: row.cell_id,
+    requestId: row.request_id,
+    kind: row.kind,
+    status: row.status,
+    sql: row.sql,
+    explanation: row.explanation,
+    baseSql: row.base_sql,
+    valid: row.valid,
+    by: row.by,
+  };
 }
 
 export interface CompactResult {
@@ -248,5 +315,62 @@ export class Store {
       ),
       times: new Map(pointed.rows.map((row) => [row.id, row.created_at.getTime()])),
     };
+  }
+
+  /** One suggestion of the notebook, or null if there's no such row. */
+  async aiSuggestion(notebookId: string, suggestionId: string): Promise<StoredSuggestion | null> {
+    const result = await this.pool.query<SuggestionRow>(
+      `SELECT ${SUGGESTION_COLUMNS} FROM ${SUGGESTION_FROM}
+       WHERE s.notebook_id = $1 AND s.id::text = $2`,
+      [notebookId, suggestionId],
+    );
+    return result.rows[0] ? toSuggestion(result.rows[0]) : null;
+  }
+
+  /**
+   * What became of the AI requests and suggestions the document shows, for
+   * reconciling after events were missed. Staleness is judged by the
+   * database's clock, the same one that stamped created_at. IDs are compared
+   * as text: they come from the shared document, which any editor can
+   * write, and a malformed one must match nothing rather than fail a cast.
+   */
+  async aiOutcomes(
+    notebookId: string,
+    requestIds: string[],
+    suggestionIds: string[],
+  ): Promise<AiOutcomes> {
+    const outcomes: AiOutcomes = {
+      requests: new Map(),
+      byRequest: new Map(),
+      suggestions: new Map(),
+    };
+    if (requestIds.length > 0) {
+      const requests = await this.pool.query<{ id: string; status: string; stale: boolean }>(
+        `SELECT id::text AS id, status,
+                created_at < now() - make_interval(secs => $3) AS stale
+         FROM ai_requests WHERE notebook_id = $1 AND id::text = ANY($2)`,
+        [notebookId, requestIds, AI_STALE_AFTER_MS / 1000],
+      );
+      for (const row of requests.rows) {
+        outcomes.requests.set(row.id, { status: row.status, stale: row.stale });
+      }
+      const suggestions = await this.pool.query<SuggestionRow>(
+        `SELECT ${SUGGESTION_COLUMNS} FROM ${SUGGESTION_FROM}
+         WHERE s.notebook_id = $1 AND s.request_id::text = ANY($2)
+         ORDER BY s.created_at`,
+        [notebookId, requestIds],
+      );
+      // Oldest first, so a request's newest suggestion wins.
+      for (const row of suggestions.rows) outcomes.byRequest.set(row.request_id, toSuggestion(row));
+    }
+    if (suggestionIds.length > 0) {
+      const statuses = await this.pool.query<{ id: string; status: SuggestionStatus }>(
+        `SELECT id::text AS id, status FROM ai_suggestions
+         WHERE notebook_id = $1 AND id::text = ANY($2)`,
+        [notebookId, suggestionIds],
+      );
+      for (const row of statuses.rows) outcomes.suggestions.set(row.id, row.status);
+    }
+    return outcomes;
   }
 }

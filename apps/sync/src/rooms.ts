@@ -11,12 +11,13 @@
  */
 import type { WebSocket } from "ws";
 
+import { STOPPED_MESSAGE, suggestionState } from "./ai.ts";
 import { Connection } from "./connection.ts";
 import { errorMessage, log } from "./log.ts";
 import type { NotebookEvent } from "./notify.ts";
 import { CloseCode } from "./protocol.ts";
 import { DEFAULT_TIMINGS, Room, type RoomTimings } from "./room.ts";
-import type { Store } from "./store.ts";
+import { AI_STALE_AFTER_MS, type Store } from "./store.ts";
 import type { Ticket } from "./ticket.ts";
 
 export interface ManagerTimings extends RoomTimings {
@@ -26,6 +27,11 @@ export interface ManagerTimings extends RoomTimings {
   unloadRetryMs: number;
   /** How often stale presence is swept from every room. */
   awarenessSweepMs: number;
+  /**
+   * How long after the AI starts thinking about a cell (or a reload finds it
+   * still thinking) its request is checked again, in case it died.
+   */
+  aiStaleCheckMs: number;
 }
 
 // After a lock's expiry, wait this much longer before re-checking: the
@@ -37,14 +43,25 @@ export const DEFAULT_MANAGER_TIMINGS: ManagerTimings = {
   unloadGraceMs: 10_000,
   unloadRetryMs: 5_000,
   awarenessSweepMs: 5_000,
+  // By then the request counts as stale by the database's clock (same slack
+  // as for run locks), so the check settles it if it's still running.
+  aiStaleCheckMs: AI_STALE_AFTER_MS + EXPIRY_CHECK_SLACK_MS,
 };
 
 export class RoomManager {
   readonly rooms = new Map<string, Room>();
   private stopping = false;
   private readonly sweepTimer: NodeJS.Timeout;
-  /** Re-checks scheduled for when a run's lock expires (see run_started). */
+  /** Re-checks scheduled for when a run's lock expires or an AI request goes stale. */
   private readonly expiryChecks = new Set<NodeJS.Timeout>();
+  /**
+   * Per notebook, the tail of its chain of AI changes. Applying an AI event
+   * can mean reading Postgres first (a suggestion's row), so without the
+   * chain a later event (that suggestion being resolved) could be applied
+   * before an earlier one finishes, and the resolved suggestion would
+   * reappear. Reconciliation joins the same chain.
+   */
+  private readonly aiChains = new Map<string, Promise<void>>();
 
   private readonly store: Store;
   private readonly timings: ManagerTimings;
@@ -70,9 +87,13 @@ export class RoomManager {
       if (this.rooms.get(gone.id) === gone) this.rooms.delete(gone.id);
     });
     this.rooms.set(notebookId, room);
-    // A loaded document may still show runs whose end was never reported.
+    // A loaded document may still show runs whose end was never reported,
+    // and AI requests whose outcome was never reported.
     room.ready.then(
-      () => void this.reconcileRuns(room),
+      () => {
+        void this.reconcileRuns(room);
+        this.reconcileAiLater(room);
+      },
       () => {},
     );
     return room;
@@ -220,6 +241,163 @@ export class RoomManager {
       case "notebook_deleted":
         this.rooms.get(event.notebookId)?.markDeleted();
         break;
+      case "ai_started": {
+        const { cellId, requestId, kind, userName } = event;
+        this.chainAi(event.notebookId, () =>
+          this.withRoom(event.notebookId, (room) =>
+            room.aiStarted(cellId, {
+              status: "thinking",
+              requestId,
+              kind,
+              by: userName,
+              // The event doesn't carry a time; it arrives as the request starts.
+              startedAt: new Date().toISOString(),
+            }),
+          ),
+        );
+        this.checkAiWhenStale(event.notebookId);
+        break;
+      }
+      case "ai_suggestion":
+        this.chainAi(event.notebookId, () =>
+          this.withRoom(event.notebookId, async (room) => {
+            const row = await this.store.aiSuggestion(room.id, event.suggestionId);
+            if (room.status !== "ready") return;
+            if (!row || row.cellId !== event.cellId || row.requestId !== event.requestId) {
+              // Left thinking; reconciliation settles it from the tables later.
+              log.warn("ai.unknown_suggestion", {
+                notebook: room.id,
+                cell: event.cellId,
+                suggestion: event.suggestionId,
+              });
+              return;
+            }
+            // Already accepted or rejected before it could be shown: its
+            // ai_resolved only clears a suggestion state, so settle the
+            // thinking state here, as reconciliation would.
+            if (row.status !== "pending") {
+              room.aiSettle(event.cellId, event.requestId, null);
+              return;
+            }
+            room.aiOutcome(event.cellId, suggestionState(row, room.aiAskedBy(event.cellId)));
+          }),
+        );
+        break;
+      case "ai_failed":
+        this.chainAi(event.notebookId, () =>
+          this.withRoom(event.notebookId, (room) =>
+            room.aiOutcome(event.cellId, {
+              status: "failed",
+              requestId: event.requestId,
+              message: event.message,
+            }),
+          ),
+        );
+        break;
+      case "ai_resolved":
+        this.chainAi(event.notebookId, () =>
+          this.withRoom(event.notebookId, (room) =>
+            room.aiResolved(event.cellId, event.suggestionId),
+          ),
+        );
+        break;
+    }
+  }
+
+  /** Runs `task` after every AI change already queued for the notebook (see aiChains). */
+  private chainAi(notebookId: string, task: () => Promise<void>): Promise<void> {
+    const previous = this.aiChains.get(notebookId) ?? Promise.resolve();
+    const next = previous.then(task).catch((error: unknown) => {
+      log.warn("ai.apply_failed", { notebook: notebookId, error: errorMessage(error) });
+    });
+    this.aiChains.set(notebookId, next);
+    void next.then(() => {
+      if (this.aiChains.get(notebookId) === next) this.aiChains.delete(notebookId);
+    });
+    return next;
+  }
+
+  /**
+   * Re-checks a notebook's AI states once a request just started could be
+   * stale. If the API process answering it died, no outcome ever comes, and
+   * a room that stays loaded would show the AI thinking forever.
+   */
+  private checkAiWhenStale(notebookId: string): void {
+    const timer = setTimeout(() => {
+      this.expiryChecks.delete(timer);
+      const room = this.rooms.get(notebookId);
+      if (room && !this.stopping) this.reconcileAiLater(room);
+    }, this.timings.aiStaleCheckMs);
+    timer.unref();
+    this.expiryChecks.add(timer);
+  }
+
+  private reconcileAiLater(room: Room): void {
+    void this.chainAi(room.id, () => this.reconcileAi(room));
+  }
+
+  /**
+   * Settles AI states whose events were missed (the listener was
+   * reconnecting, or the API process died mid-request), from the tables:
+   * - thinking: the request's suggestion if it has one (cleared instead if
+   *   that was already accepted or rejected); otherwise, if the request
+   *   isn't running anymore or started too long ago, a failure;
+   * - suggestion: cleared once its row is no longer pending (or is gone).
+   * Runs when a room loads, after the listener reconnects, and when a
+   * request started in this room could have gone stale.
+   */
+  async reconcileAi(room: Room): Promise<void> {
+    if (room.status !== "ready") return;
+    const states = room.aiStates();
+    const requestIds: string[] = [];
+    const suggestionIds: string[] = [];
+    for (const ref of states.values()) {
+      if (ref.status === "thinking") requestIds.push(ref.requestId);
+      if (ref.status === "suggestion" && ref.suggestionId) suggestionIds.push(ref.suggestionId);
+    }
+    if (requestIds.length === 0 && suggestionIds.length === 0) return;
+    room.holds++;
+    try {
+      const outcomes = await this.store.aiOutcomes(room.id, requestIds, suggestionIds);
+      if (room.status !== "ready") return;
+      let stillThinking = false;
+      for (const [cellId, ref] of states) {
+        if (ref.status === "thinking") {
+          const suggestion = outcomes.byRequest.get(ref.requestId);
+          const request = outcomes.requests.get(ref.requestId);
+          let settled = false;
+          if (suggestion && suggestion.cellId === cellId) {
+            const state =
+              suggestion.status === "pending"
+                ? suggestionState(suggestion, room.aiAskedBy(cellId))
+                : null;
+            settled = room.aiSettle(cellId, ref.requestId, state);
+          } else if (!request || request.status !== "running" || request.stale) {
+            settled = room.aiSettle(cellId, ref.requestId, {
+              status: "failed",
+              requestId: ref.requestId,
+              message: STOPPED_MESSAGE,
+            });
+          } else {
+            stillThinking = true; // running and recent: left as it is
+          }
+          if (settled) log.info("ai.reconciled", { notebook: room.id, cell: cellId });
+        } else if (ref.status === "suggestion" && ref.suggestionId) {
+          if (outcomes.suggestions.get(ref.suggestionId) !== "pending") {
+            room.aiResolved(cellId, ref.suggestionId);
+            log.info("ai.reconciled", { notebook: room.id, cell: cellId });
+          }
+        }
+      }
+      // A request found running (say, after a reload) gets the same re-check
+      // as one whose start this server saw, or a request that then dies would
+      // show the AI thinking for as long as the room stays loaded.
+      if (stillThinking) this.checkAiWhenStale(room.id);
+    } catch (error) {
+      log.warn("ai.reconcile_failed", { notebook: room.id, error: errorMessage(error) });
+    } finally {
+      room.holds--;
+      if (room.idle) this.scheduleUnload(room, 0);
     }
   }
 
@@ -232,13 +410,17 @@ export class RoomManager {
    * the same `ready` promise, and promise callbacks run in the order they
    * were registered.
    */
-  private async withRoom(notebookId: string, change: (room: Room) => void): Promise<void> {
+  private async withRoom(
+    notebookId: string,
+    change: (room: Room) => unknown | Promise<unknown>,
+  ): Promise<void> {
     if (this.stopping) return;
     const room = this.acquire(notebookId);
     room.holds++;
     try {
       await room.ready;
-      if (room.status === "ready") change(room);
+      // The room stays held while an asynchronous change reads Postgres.
+      if (room.status === "ready") await change(room);
     } catch (error) {
       log.warn("notify.apply_failed", { notebook: notebookId, error: errorMessage(error) });
     } finally {
@@ -260,6 +442,7 @@ export class RoomManager {
       [...this.rooms.values()].map(async (room) => {
         await this.recheckRoom(room);
         await this.reconcileRuns(room);
+        await this.chainAi(room.id, () => this.reconcileAi(room));
       }),
     );
   }

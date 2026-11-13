@@ -9,10 +9,11 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { applyAwarenessUpdate, Awareness, encodeAwarenessUpdate } from "y-protocols/awareness";
 import * as Y from "yjs";
 
 import { NotebookEditor } from "@/components/notebook/NotebookEditor";
-import { ApiError, type ApiClient, type Notebook } from "@/lib/api";
+import { ApiError, type ApiClient, type Notebook, type Run } from "@/lib/api";
 import { appendCell, cellsMap, orderedCells, setLastRun } from "@/lib/notebook/doc";
 import { fakeApi, NOTEBOOK, USER } from "@/test/fakeApi";
 import { ticketFor } from "@/test/tickets";
@@ -202,6 +203,83 @@ describe("NotebookEditor", () => {
     const list = await screen.findByRole("list", { name: "People in this notebook" });
     expect(list.textContent).toBe("AL");
     expect(screen.getByLabelText("Ada Lovelace (you)")).toBeTruthy();
+  });
+
+  it("shows the AI assistant in the presence list, apart from the people", async () => {
+    const { providers, serve } = renderEditor();
+    await serve();
+    const awareness = providers.latest().awareness;
+    act(() =>
+      awareness.setLocalState({ user: { id: "u1", name: "Ada Lovelace", color: "#2563eb" } }),
+    );
+    // The AI's entry as the sync server announces it, under its own client ID.
+    const server = new Awareness(new Y.Doc());
+    server.setLocalState({
+      user: { id: "ai-assistant", name: "AI assistant", color: "#7c3aed" },
+      cursor: null,
+      ai: { cellId: "sql-1", status: "thinking" },
+    });
+    act(() =>
+      applyAwarenessUpdate(awareness, encodeAwarenessUpdate(server, [server.clientID]), "server"),
+    );
+    const ai = await screen.findByLabelText("AI assistant (thinking)");
+    expect(ai.textContent).toBe("AI");
+    expect(ai.getAttribute("data-ai")).toBe("true");
+    expect(ai.style.backgroundColor).toBe("rgb(124, 58, 237)");
+    const list = screen.getByRole("list", { name: "People in this notebook" });
+    expect(list.textContent).toBe("ALAI"); // you first, the AI last
+
+    // It leaves when the server removes it.
+    act(() => {
+      server.setLocalState(null);
+      applyAwarenessUpdate(awareness, encodeAwarenessUpdate(server, [server.clientID]), "server");
+    });
+    await waitFor(() => expect(screen.queryByLabelText(/AI assistant/)).toBeNull());
+  });
+
+  it("shows every member what the AI is doing in a cell, and offers a fix after a failed run", async () => {
+    const doc = new Y.Doc();
+    appendCell(doc, "sql", "sql-1");
+    orderedCells(doc)[0].source!.insert(0, "select nope");
+    setLastRun(doc, "sql-1", "r1");
+    const failedRun: Run = {
+      id: "r1",
+      cell_id: "sql-1",
+      sql: "select nope",
+      status: "error",
+      result: null,
+      error: { kind: "error", message: "Binder Error: column nope not found" },
+      created_at: "2026-11-13T07:00:00Z",
+    };
+    const { api, providers, serve } = renderEditor({ getRun: vi.fn(async () => failedRun) });
+    await serve(Y.encodeStateAsUpdate(doc));
+    fireEvent.click(await screen.findByRole("button", { name: "Fix with AI" }));
+    await waitFor(() => expect(api.askAi).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.askAi).mock.calls[0].slice(0, 3)).toEqual([
+      NOTEBOOK.id,
+      "sql-1",
+      { kind: "fix", sql: "select nope", error: "Binder Error: column nope not found" },
+    ]);
+
+    // The sync server reports the request in the document.
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(providers.latest().doc));
+    cellsMap(remote).get("sql-1")!.set("ai", {
+      status: "thinking",
+      requestId: "req-1",
+      kind: "fix",
+      by: "Grace",
+      startedAt: "2026-11-13T10:00:00Z",
+    });
+    act(() =>
+      providers
+        .latest()
+        .remote(Y.encodeStateAsUpdate(remote, Y.encodeStateVector(providers.latest().doc))),
+    );
+    expect(await screen.findByText("AI assistant is thinking… (asked by Grace)")).toBeTruthy();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Fix with AI" }).disabled).toBe(
+      true,
+    );
   });
 
   it("renames on blur and reverts on Escape", async () => {

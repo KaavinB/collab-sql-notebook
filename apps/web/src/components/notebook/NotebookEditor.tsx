@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import * as Y from "yjs";
 
+import { AiAssist, type FailedRun } from "@/components/notebook/AiAssist";
 import { CellFrame, MarkdownCellBody, RunButton, SqlCellBody } from "@/components/notebook/Cells";
 import {
   ChartCellBody,
@@ -239,6 +240,8 @@ function LoadedNotebook({
       {cells.map((cell, index) => (
         <Cell
           key={cell.id}
+          api={api}
+          notebookId={notebook.id}
           doc={doc}
           cell={cell}
           index={index}
@@ -260,6 +263,8 @@ function LoadedNotebook({
 }
 
 function Cell({
+  api,
+  notebookId,
   doc,
   cell,
   index,
@@ -273,6 +278,8 @@ function Cell({
   cells,
   readOnly,
 }: {
+  api: ApiClient;
+  notebookId: string;
   doc: Y.Doc;
   cell: CellView;
   index: number;
@@ -305,6 +312,10 @@ function Cell({
     const stored = await runCell(cell.id, sql);
     if (stored) setLastRunIfUnchanged(doc, cell.id, before, stored.id);
   }, [cell, doc, runCell]);
+  // "Fix with AI" is offered when the cell's latest result is an error.
+  const latest = cell.lastRunId ? runs.get(cell.lastRunId) : undefined;
+  const failedRun: FailedRun | null =
+    latest?.status === "error" ? { sql: latest.sql, error: latest.error.message } : null;
 
   return (
     <CellFrame
@@ -330,6 +341,18 @@ function Cell({
           ensureRun={ensureRun}
           onRun={() => void run()}
           readOnly={readOnly}
+          assistant={
+            <AiAssist
+              api={api}
+              notebookId={notebookId}
+              doc={doc}
+              cellId={cell.id}
+              source={cell.source}
+              ai={cell.ai}
+              failedRun={failedRun}
+              readOnly={readOnly}
+            />
+          }
         />
       )}
       {cell.type === "markdown" && cell.source && (

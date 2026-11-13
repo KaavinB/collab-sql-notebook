@@ -262,6 +262,75 @@ describe("api client", () => {
     );
   });
 
+  describe("AI assistant", () => {
+    const SUGGESTION = {
+      id: "7d4c2f9e-3b1a-4e8d-9c6f-2a5b8e1d4c70",
+      cell_id: "cell-1",
+      kind: "fix",
+      status: "pending",
+      sql: "select count(*) from trips",
+      explanation: "Added the missing FROM.",
+      base_sql: "select count(*)",
+      valid: true,
+      created_at: "2026-11-13T07:00:00Z",
+    };
+
+    it.each([
+      { kind: "generate", prompt: "how many trips?" },
+      { kind: "fix", sql: "select count(*)", error: "Binder Error" },
+      { kind: "explain", sql: "select 1" },
+    ] as const)("asks for a %s and validates the suggestion", async (body) => {
+      const { api, fetchMock } = client(json(SUGGESTION));
+      expect(await api.askAi(NOTEBOOK.id, "cell-1", body)).toEqual(SUGGESTION);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${BASE}/notebooks/${NOTEBOOK.id}/cells/cell-1/ai`);
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(init?.body as string)).toEqual(body);
+    });
+
+    it("accepts an explanation without SQL", async () => {
+      const explanation = { ...SUGGESTION, kind: "explain", sql: null, base_sql: "select 1" };
+      const { api } = client(json(explanation));
+      expect(await api.askAi(NOTEBOOK.id, "c", { kind: "explain", sql: "select 1" })).toEqual(
+        explanation,
+      );
+    });
+
+    it.each([
+      ["an unknown kind", { kind: "rewrite" }],
+      ["an unknown status", { status: "maybe" }],
+      ["a missing validity", { valid: undefined }],
+      ["SQL that isn't text", { sql: 5 }],
+      ["an ID that isn't a UUID", { id: "s1" }],
+    ])("rejects a suggestion with %s", async (_why, change) => {
+      const { api } = client(json({ ...SUGGESTION, ...change }));
+      await expect(
+        api.askAi(NOTEBOOK.id, "c", { kind: "generate", prompt: "q" }),
+      ).rejects.toMatchObject({ kind: "invalid_response" });
+    });
+
+    it.each([
+      [409, "busy"],
+      [429, "rate_limited"],
+      [503, "unavailable"],
+    ])("reports the API's refusal (%i %s)", async (status, kind) => {
+      const { api } = client(json({ detail: { kind, message: `It said ${kind}.` } }, status));
+      await expect(
+        api.askAi(NOTEBOOK.id, "c", { kind: "generate", prompt: "q" }),
+      ).rejects.toMatchObject({ status, kind, message: `It said ${kind}.` });
+    });
+
+    it("records a decision", async () => {
+      const { api, fetchMock } = client(json({ ...SUGGESTION, status: "accepted" }));
+      const decided = await api.decideSuggestion(NOTEBOOK.id, SUGGESTION.id, "accepted");
+      expect(decided.status).toBe("accepted");
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${BASE}/notebooks/${NOTEBOOK.id}/ai/suggestions/${SUGGESTION.id}/decision`);
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(init?.body as string)).toEqual({ decision: "accepted" });
+    });
+  });
+
   it("encodes path segments", async () => {
     const { api, fetchMock } = client(json(NOTEBOOK));
     await api.getNotebook("a/../b");

@@ -105,7 +105,7 @@ function CellEditButtons({
 }
 
 /** The current text of a Y.Text, re-rendering when it changes. */
-function useText(text: Y.Text): string {
+export function useText(text: Y.Text): string {
   return useSyncExternalStore(
     (onChange) => {
       text.observe(onChange);
@@ -126,6 +126,8 @@ interface SqlCellProps {
   onRun: () => void;
   /** View only: the SQL can't be edited or run (Mod-Enter does nothing). */
   readOnly?: boolean;
+  /** The AI assistant's controls and suggestions, shown right under the editor. */
+  assistant?: React.ReactNode;
 }
 
 export function SqlCellBody({
@@ -137,6 +139,7 @@ export function SqlCellBody({
   ensureRun,
   onRun,
   readOnly = false,
+  assistant,
 }: SqlCellProps) {
   const run = useLatestRun(cell.lastRunId, runs, ensureRun);
   const loadFailure = cell.lastRunId ? loadFailures.get(cell.lastRunId) : undefined;
@@ -153,6 +156,7 @@ export function SqlCellBody({
         onSubmit={readOnly ? undefined : onRun}
         readOnly={readOnly}
       />
+      {assistant}
       {state.status === "running" && (
         <p className="text-xs text-zinc-500" role="status">
           {state.ignoredSubmit

@@ -30,6 +30,9 @@
  * - Identity. `state.user` is replaced with { id, name, color } from the
  *   connection's ticket, so nobody can appear as someone else.
  * - Size. States over MAX_STATE_BYTES are dropped.
+ * - Reserved IDs. Some client IDs belong to the server itself (the AI
+ *   assistant's presence): no connection can announce them, even first, and
+ *   copies clients relay back are dropped like any other peer's.
  *
  * Clocks: the server relays states with its own clock, not the client's. A
  * client that reconnects keeps its old clock, which peers have already seen,
@@ -61,6 +64,8 @@ import { MalformedMessage } from "./protocol.ts";
 export const MAX_STATE_BYTES = 8 * 1024;
 /** Same as y-protocols: clients renew every 15 s and drop peers silent for 30 s. */
 export const OUTDATED_TIMEOUT_MS = 30_000;
+/** Server-owned states are re-sent this often, as clients renew theirs, so peers keep them. */
+export const SERVER_RENEW_MS = 15_000;
 // Bounds the work one message can cause. A client re-sending every state it
 // knows sends one entry per collaborator.
 const MAX_ENTRIES_PER_MESSAGE = 10_000;
@@ -200,12 +205,19 @@ export class RoomAwareness<O> {
   private readonly ownedBy = new Map<O, number>();
   /** Connections whose own user's other entries were held back (see the module comment). */
   private readonly heldBack = new Set<O>();
+  /** States the server itself announces, under reserved client IDs. */
+  private readonly serverStates = new Map<
+    number,
+    { clock: number; state: State; json: string; sentAt: number }
+  >();
   private counter = 0;
 
   private readonly now: () => number;
+  private readonly reserved: ReadonlySet<number>;
 
-  constructor(now: () => number = Date.now) {
+  constructor(now: () => number = Date.now, reserved: Iterable<number> = []) {
     this.now = now;
+    this.reserved = new Set(reserved);
   }
 
   private nextClock(): number {
@@ -215,16 +227,54 @@ export class RoomAwareness<O> {
 
   /** The number of live (non-removed) states. */
   get size(): number {
-    let count = 0;
+    let count = this.serverStates.size;
     for (const client of this.clients.values()) if (client.state !== null) count++;
     return count;
   }
 
-  /** The live states, for tests and diagnostics. */
+  /** The live states (the server's own included), for tests and diagnostics. */
   states(): Map<number, State> {
     const states = new Map<number, State>();
     for (const [id, client] of this.clients) if (client.state) states.set(id, client.state);
+    for (const [id, entry] of this.serverStates) states.set(id, entry.state);
     return states;
+  }
+
+  /**
+   * Sets (or, with null, removes) the state the server announces under the
+   * reserved `clientId`. Returns the update to send to every connection, or
+   * null if nothing changed.
+   */
+  setServerState(clientId: number, state: State | null): Uint8Array | null {
+    if (!this.reserved.has(clientId)) throw new Error(`client ID ${clientId} is not reserved`);
+    const existing = this.serverStates.get(clientId);
+    if (state === null) {
+      if (!existing) return null;
+      this.serverStates.delete(clientId);
+      return encodeEntries([{ clientId, clock: this.nextClock(), state: null }]);
+    }
+    const json = JSON.stringify(state);
+    if (existing?.json === json) return null;
+    const entry = { clock: this.nextClock(), state, json, sentAt: this.now() };
+    this.serverStates.set(clientId, entry);
+    return encodeEntries([{ clientId, clock: entry.clock, state }]);
+  }
+
+  /**
+   * Server states not sent for SERVER_RENEW_MS, with fresh clocks: clients
+   * drop a peer they haven't heard from in OUTDATED_TIMEOUT_MS. Null if none
+   * is due.
+   */
+  renewServerStates(): Uint8Array | null {
+    const cutoff = this.now() - SERVER_RENEW_MS;
+    const due: Entry[] = [];
+    for (const [clientId, entry] of this.serverStates) {
+      if (entry.sentAt > cutoff) continue;
+      entry.clock = this.nextClock();
+      entry.sentAt = this.now();
+      due.push({ clientId, clock: entry.clock, state: entry.state });
+    }
+    return due.length === 0 ? null : encodeEntries(due);
   }
 
   /**
@@ -273,6 +323,7 @@ export class RoomAwareness<O> {
     clock: number,
     stateBytes: Uint8Array,
   ): boolean {
+    if (this.reserved.has(clientId)) return false; // the server's own
     const existing = this.clients.get(clientId);
     const ownsOne = this.ownedBy.has(owner);
     // A claim: the connection's first clientID, either new or taken over
@@ -355,8 +406,9 @@ export class RoomAwareness<O> {
 
   /**
    * Every live state, for connection `viewer` (signed in as `userId`) that
-   * just joined or asked for them. Null if none. Others' entries get a fresh
-   * clock (stored, so clocks stay increasing for every recipient). Until the
+   * just joined or asked for them, the server's own (the AI's) included.
+   * Null if none. Others' entries get a fresh clock (stored, so clocks stay
+   * increasing for every recipient). Until the
    * viewer has announced its own clientID, its user's entries on other
    * connections are held back; see the module comment.
    */
@@ -371,7 +423,12 @@ export class RoomAwareness<O> {
       }
       return true;
     });
-    const entries = [...own.filter((entry) => entry.state !== null), ...others];
+    const server: Entry[] = [];
+    for (const [clientId, entry] of this.serverStates) {
+      entry.clock = this.nextClock();
+      server.push({ clientId, clock: entry.clock, state: entry.state });
+    }
+    const entries = [...own.filter((entry) => entry.state !== null), ...others, ...server];
     return entries.length === 0 ? null : encodeEntries(entries);
   }
 

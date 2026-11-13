@@ -10,7 +10,11 @@ import {
   isValidOrderKey,
   moveCell,
   orderedCells,
+  MAX_AI_EXPLANATION_LENGTH,
+  MAX_AI_SQL_LENGTH,
+  readAi,
   readRunning,
+  replaceCellText,
   setLastRun,
   setLastRunIfUnchanged,
 } from "@/lib/notebook/doc";
@@ -330,6 +334,106 @@ describe("running state", () => {
     const id = appendCell(doc, "markdown");
     cellsMap(doc).get(id)!.set("running", valid);
     expect(orderedCells(doc)[0].running).toBeNull();
+  });
+});
+
+describe("AI state", () => {
+  const thinking = {
+    status: "thinking",
+    requestId: "r1",
+    kind: "generate",
+    by: "Ada",
+    startedAt: "2026-11-13T10:00:00Z",
+  };
+  const suggestion = {
+    status: "suggestion",
+    requestId: "r1",
+    suggestionId: "s1",
+    kind: "fix",
+    sql: "select 2",
+    explanation: "Fixed.",
+    baseSql: "select 1",
+    valid: false,
+    by: "Ada",
+  };
+  const failed = { status: "failed", requestId: "r1", message: "No key." };
+
+  it("reads each state from a sql cell", () => {
+    const doc = new Y.Doc();
+    const id = appendCell(doc, "sql");
+    for (const state of [thinking, suggestion, failed]) {
+      cellsMap(doc).get(id)!.set("ai", state);
+      expect(orderedCells(doc)[0].ai).toEqual(state);
+    }
+    cellsMap(doc).get(id)!.set("ai", null);
+    expect(orderedCells(doc)[0].ai).toBeNull();
+  });
+
+  it("reads an explanation (no SQL) and a thinking state without a start time", () => {
+    expect(readAi({ ...suggestion, kind: "explain", sql: null })).toMatchObject({ sql: null });
+    expect(readAi({ ...thinking, startedAt: undefined })).toMatchObject({ startedAt: null });
+  });
+
+  it.each([
+    ["not an object", "thinking"],
+    ["an array", [thinking]],
+    ["an unknown status", { ...thinking, status: "dreaming" }],
+    ["no request ID", { ...thinking, requestId: undefined }],
+    ["an empty request ID", { ...thinking, requestId: "" }],
+    ["an unknown kind", { ...thinking, kind: "delete" }],
+    ["a huge name", { ...thinking, by: "x".repeat(201) }],
+    ["no suggestion ID", { ...suggestion, suggestionId: undefined }],
+    ["SQL that isn't text", { ...suggestion, sql: 42 }],
+    ["huge SQL", { ...suggestion, sql: "x".repeat(MAX_AI_SQL_LENGTH + 1) }],
+    ["a huge base SQL", { ...suggestion, baseSql: "x".repeat(MAX_AI_SQL_LENGTH + 1) }],
+    [
+      "a huge explanation",
+      { ...suggestion, explanation: "x".repeat(MAX_AI_EXPLANATION_LENGTH + 1) },
+    ],
+    ["no explanation", { ...suggestion, explanation: undefined }],
+    ["a validity that isn't a boolean", { ...suggestion, valid: "yes" }],
+    ["a failure without a message", { ...failed, message: undefined }],
+    ["a huge failure message", { ...failed, message: "x".repeat(1001) }],
+  ])("ignores a malformed entry (%s)", (_label, value) => {
+    expect(readAi(value)).toBeNull();
+  });
+
+  it("only sql cells carry it", () => {
+    const doc = new Y.Doc();
+    const id = appendCell(doc, "markdown");
+    cellsMap(doc).get(id)!.set("ai", thinking);
+    expect(orderedCells(doc)[0].ai).toBeNull();
+  });
+});
+
+describe("replaceCellText", () => {
+  function sqlCell(text: string) {
+    const doc = new Y.Doc();
+    const id = appendCell(doc, "sql");
+    const source = orderedCells(doc)[0].source!;
+    source.insert(0, text);
+    return { doc, id, source };
+  }
+
+  it("replaces the whole text in one transaction, which one undo reverts", () => {
+    const { doc, id, source } = sqlCell("select 1");
+    const undo = new Y.UndoManager(source);
+    let transactions = 0;
+    doc.on("afterTransaction", () => transactions++);
+    expect(replaceCellText(doc, id, "select count(*) from trips")).toBe(true);
+    expect(source.toString()).toBe("select count(*) from trips");
+    expect(transactions).toBe(1);
+    undo.undo();
+    expect(source.toString()).toBe("select 1");
+  });
+
+  it("does nothing when the text already is the suggestion, or the cell is gone", () => {
+    const { doc, id } = sqlCell("select 2");
+    let transactions = 0;
+    doc.on("update", () => transactions++);
+    expect(replaceCellText(doc, id, "select 2")).toBe(false);
+    expect(replaceCellText(doc, "missing", "select 2")).toBe(false);
+    expect(transactions).toBe(0);
   });
 });
 

@@ -17,6 +17,7 @@
  */
 import * as Y from "yjs";
 
+import { AI_CLIENT_ID, aiPresence, readAiRef, type AiRef, type AiState } from "./ai.ts";
 import { RoomAwareness } from "./awareness.ts";
 import type { Connection } from "./connection.ts";
 import { errorMessage, log } from "./log.ts";
@@ -96,7 +97,7 @@ export interface RunningState {
 export class Room {
   status: RoomStatus = "loading";
   readonly doc = new Y.Doc();
-  readonly awareness = new RoomAwareness<Connection>();
+  readonly awareness = new RoomAwareness<Connection>(Date.now, [AI_CLIENT_ID]);
   readonly conns = new Set<Connection>();
   /** Server-side operations (NOTIFY events) using the room; it stays loaded while > 0. */
   holds = 0;
@@ -114,6 +115,8 @@ export class Room {
   private lastWriteFailed = false;
   private logRows = 0;
   private compacting: Promise<void> | null = null;
+  /** The cell the AI acted on last; its presence prefers it (see aiPresence). */
+  private lastAiCell: string | null = null;
 
   readonly id: string;
   private readonly store: Store;
@@ -126,7 +129,13 @@ export class Room {
     this.store = store;
     this.timings = timings;
     this.onGone = onGone;
+    // Defined before anything is applied: until then Yjs integrates incoming
+    // cells into a placeholder type that getMap later swaps out, so the
+    // first transactions would report changes on an object that's no longer
+    // the cells map, and the AI presence (onAfterTransaction) would miss them.
+    this.doc.getMap("cells");
     this.doc.on("update", this.onDocUpdate);
+    this.doc.on("afterTransaction", this.onAfterTransaction);
     this.ready = this.load();
     // Callers observe failures through `ready`; this keeps an unobserved
     // rejection from being reported as unhandled.
@@ -305,11 +314,145 @@ export class Room {
     this.broadcast(syncMessage(SYNC_UPDATE, update), sender);
   };
 
-  /** Drops presence that wasn't renewed in time (see RoomAwareness.sweep). */
+  /**
+   * Drops presence that wasn't renewed in time (see RoomAwareness.sweep),
+   * and renews the server's own (the AI's) so clients keep showing it.
+   */
   sweepAwareness(): void {
     for (const { owner, removal } of this.awareness.sweep()) {
       this.broadcast(awarenessMessage(removal), owner);
     }
+    const renewal = this.awareness.renewServerStates();
+    if (renewal) this.broadcast(awarenessMessage(renewal));
+  }
+
+  // --- AI state (server-origin changes) and the AI's presence ------------
+
+  /**
+   * Keeps the AI's presence in step with the document. Whoever changed a
+   * cell's `ai` (this server, or an editor's client: editors can write
+   * anything), or deleted a cell, the presence follows what the document
+   * now says. Other changes (typing) don't touch it.
+   */
+  private onAfterTransaction = (transaction: Y.Transaction): void => {
+    if (this.status === "deleted" || this.status === "closed" || this.status === "failed") return;
+    const cells: unknown = this.cellsMap();
+    if (!cells) return;
+    for (const [type, keys] of transaction.changed) {
+      const aCell =
+        type instanceof Y.Map &&
+        type._item?.parent === cells &&
+        (keys.has("ai") || keys.has("type") || keys.has("source"));
+      if (type === cells || aCell) {
+        this.refreshAiPresence();
+        return;
+      }
+    }
+  };
+
+  private refreshAiPresence(): void {
+    const cells = this.cellsMap();
+    const update = this.awareness.setServerState(
+      AI_CLIENT_ID,
+      cells ? aiPresence(cells, this.lastAiCell) : null,
+    );
+    if (update) this.broadcast(awarenessMessage(update));
+  }
+
+  private cellsMap(): Y.Map<unknown> | null {
+    try {
+      return this.doc.getMap<unknown>("cells");
+    } catch {
+      return null; // "cells" was created as some other type by a client
+    }
+  }
+
+  /** Every SQL cell's current AI state, as far as the server needs to know it. */
+  aiStates(): Map<string, AiRef> {
+    const states = new Map<string, AiRef>();
+    this.cellsMap()?.forEach((cell, cellId) => {
+      if (!(cell instanceof Y.Map) || cell.get("type") !== "sql") return;
+      const ref = readAiRef(cell.get("ai"));
+      if (ref) states.set(cellId, ref);
+    });
+    return states;
+  }
+
+  /** Who the cell's thinking state says asked ("" if it isn't thinking). */
+  aiAskedBy(cellId: string): string {
+    const ai = this.sqlCell(cellId)?.get("ai") as { status?: unknown; by?: unknown } | undefined;
+    return ai?.status === "thinking" && typeof ai.by === "string" ? ai.by : "";
+  }
+
+  /**
+   * Writes `value` into the SQL cell's `ai` if `allowed` approves of what it
+   * holds now. Returns whether it wrote.
+   */
+  private writeAi(
+    cellId: string,
+    value: AiState | null,
+    allowed: (current: AiRef | null) => boolean,
+  ): boolean {
+    let written = false;
+    this.doc.transact(() => {
+      const cell = this.sqlCell(cellId);
+      if (!cell || !allowed(readAiRef(cell.get("ai")))) return;
+      if (value) this.lastAiCell = cellId;
+      cell.set("ai", value);
+      written = true;
+    }, SERVER_ORIGIN);
+    return written;
+  }
+
+  /**
+   * A new request. It replaces whatever the cell showed except a suggestion
+   * still waiting for a decision: dropping that from the document would
+   * leave its row pending forever, with nobody able to see or decide it.
+   * (The API refuses a new request while one is pending, so this only
+   * happens if that check is bypassed; the suggestion's resolution or
+   * reconciliation clears it as usual.)
+   */
+  aiStarted(cellId: string, state: AiState & { status: "thinking" }): void {
+    const written = this.writeAi(cellId, state, (current) => current?.status !== "suggestion");
+    if (!written && this.sqlCell(cellId)) {
+      log.warn("ai.started_over_suggestion", {
+        notebook: this.id,
+        cell: cellId,
+        request: state.requestId,
+      });
+    }
+  }
+
+  /**
+   * A request's outcome (a suggestion, or a failure). It replaces the cell's
+   * state only if that's about the same request, or nothing still waiting:
+   * never another request's thinking or pending suggestion.
+   */
+  aiOutcome(cellId: string, state: AiState & { status: "suggestion" | "failed" }): boolean {
+    return this.writeAi(
+      cellId,
+      state,
+      (current) =>
+        current === null || current.status === "failed" || current.requestId === state.requestId,
+    );
+  }
+
+  /** Settles a cell still thinking about `requestId` (reconciliation). */
+  aiSettle(cellId: string, requestId: string, state: AiState | null): boolean {
+    return this.writeAi(
+      cellId,
+      state,
+      (current) => current?.status === "thinking" && current.requestId === requestId,
+    );
+  }
+
+  /** The suggestion was accepted or rejected: it leaves the cell, if the cell still shows it. */
+  aiResolved(cellId: string, suggestionId: string): boolean {
+    return this.writeAi(
+      cellId,
+      null,
+      (current) => current?.status === "suggestion" && current.suggestionId === suggestionId,
+    );
   }
 
   // --- Run state (server-origin changes) --------------------------------

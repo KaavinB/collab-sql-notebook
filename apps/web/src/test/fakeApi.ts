@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 
-import type { ApiClient, Notebook, Run, User } from "@/lib/api";
+import type { ApiClient, Notebook, Run, Suggestion, User } from "@/lib/api";
 import { ticketFor } from "@/test/tickets";
 
 export const NOTEBOOK: Notebook = {
@@ -31,6 +31,23 @@ export function okRun(id: string, value: unknown, cellId = "c1"): Run {
     },
     error: null,
     created_at: "2026-11-13T07:00:00Z",
+  };
+}
+
+export const SUGGESTION_ID = "7d4c2f9e-3b1a-4e8d-9c6f-2a5b8e1d4c70";
+
+export function suggestion(overrides: Partial<Suggestion> = {}): Suggestion {
+  return {
+    id: SUGGESTION_ID,
+    cell_id: "c1",
+    kind: "generate",
+    status: "pending",
+    sql: "select count(*) from trips",
+    explanation: "Counts the trips.",
+    base_sql: null,
+    valid: true,
+    created_at: "2026-11-13T07:00:00Z",
+    ...overrides,
   };
 }
 
@@ -75,6 +92,12 @@ export function fakeApi(overrides: Partial<ApiClient> = {}) {
       role,
     })),
     removeMember: vi.fn<ApiClient["removeMember"]>(async () => {}),
+    askAi: vi.fn<ApiClient["askAi"]>(async (_nb, cellId, body) =>
+      suggestion({ cell_id: cellId, kind: body.kind }),
+    ),
+    decideSuggestion: vi.fn<ApiClient["decideSuggestion"]>(async (_nb, id, decision) =>
+      suggestion({ id, status: decision }),
+    ),
     syncTicket: vi.fn<ApiClient["syncTicket"]>(async () => ({
       ticket: ticketFor(USER.id),
       url: "ws://localhost:8020",

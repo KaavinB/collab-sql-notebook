@@ -11,7 +11,8 @@
  * tables (the server does that for every open socket and loaded room), and
  * run state is reconciled: a cell still marked running whose execution no
  * longer holds the API's lock gets the run that execution stored, if any,
- * and stops showing as running (see RoomManager.reconcileRuns).
+ * and stops showing as running (see RoomManager.reconcileRuns). AI requests
+ * are reconciled the same way (see RoomManager.reconcileAi).
  *
  * Payloads come from the database, but they're validated like any other
  * input: a malformed one is logged and ignored, and an unknown `type` is
@@ -44,7 +45,35 @@ export type NotebookEvent =
       runId: string | null;
     }
   | { type: "access_changed"; notebookId: string; userId: string }
-  | { type: "notebook_deleted"; notebookId: string };
+  | { type: "notebook_deleted"; notebookId: string }
+  | {
+      type: "ai_started";
+      notebookId: string;
+      cellId: string;
+      requestId: string;
+      kind: AiKind;
+      userName: string;
+    }
+  | {
+      type: "ai_suggestion";
+      notebookId: string;
+      cellId: string;
+      requestId: string;
+      /** The suggestion itself is read from ai_suggestions: its SQL is too big for a NOTIFY. */
+      suggestionId: string;
+    }
+  | { type: "ai_failed"; notebookId: string; cellId: string; requestId: string; message: string }
+  | {
+      type: "ai_resolved";
+      notebookId: string;
+      cellId: string;
+      suggestionId: string;
+      decision: "accepted" | "rejected";
+    };
+
+export const AI_KINDS = ["generate", "fix", "explain"] as const;
+export type AiKind = (typeof AI_KINDS)[number];
+const DECISIONS = ["accepted", "rejected"] as const;
 
 // The API accepts only these cell IDs (they also live in the document).
 const CELL_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -52,6 +81,8 @@ const EXECUTION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 // Same cap as users.name, in code points (see ticket.ts).
 const MAX_NAME_LENGTH = 200;
 const MAX_TIMESTAMP_LENGTH = 64;
+// The API keeps AI failure messages this short, in code points.
+export const MAX_AI_MESSAGE_LENGTH = 300;
 
 class InvalidEvent extends Error {}
 
@@ -78,6 +109,20 @@ function matching(value: unknown, pattern: RegExp, field: string): string {
   return value;
 }
 
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], field: string): T {
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
+    throw new InvalidEvent(`bad ${field}`);
+  }
+  return value as T;
+}
+
+function userName(value: unknown): string {
+  if (typeof value !== "string" || [...value].length > MAX_NAME_LENGTH) {
+    throw new InvalidEvent("bad user_name");
+  }
+  return value;
+}
+
 /**
  * The event in `payload`, or null if it should be ignored (unknown type).
  * Throws InvalidEvent if a known event is malformed.
@@ -85,10 +130,7 @@ function matching(value: unknown, pattern: RegExp, field: string): string {
 function toEvent(raw: Record<string, unknown>): NotebookEvent | null {
   switch (raw.type) {
     case "run_started": {
-      const userName = raw.user_name;
-      if (typeof userName !== "string" || [...userName].length > MAX_NAME_LENGTH) {
-        throw new InvalidEvent("bad user_name");
-      }
+      const name = userName(raw.user_name);
       const startedAt = timestamp(raw.started_at, "started_at");
       const expiresAt =
         raw.expires_at === undefined ? null : timestamp(raw.expires_at, "expires_at");
@@ -97,7 +139,7 @@ function toEvent(raw: Record<string, unknown>): NotebookEvent | null {
         notebookId: uuid(raw.notebook_id, "notebook_id"),
         cellId: matching(raw.cell_id, CELL_ID, "cell_id"),
         executionId: matching(raw.execution_id, EXECUTION_ID, "execution_id"),
-        userName,
+        userName: name,
         startedAt,
         expiresAt,
       };
@@ -118,6 +160,44 @@ function toEvent(raw: Record<string, unknown>): NotebookEvent | null {
       };
     case "notebook_deleted":
       return { type: "notebook_deleted", notebookId: uuid(raw.notebook_id, "notebook_id") };
+    case "ai_started":
+      return {
+        type: "ai_started",
+        notebookId: uuid(raw.notebook_id, "notebook_id"),
+        cellId: matching(raw.cell_id, CELL_ID, "cell_id"),
+        requestId: uuid(raw.request_id, "request_id"),
+        kind: oneOf(raw.kind, AI_KINDS, "kind"),
+        userName: userName(raw.user_name),
+      };
+    case "ai_suggestion":
+      return {
+        type: "ai_suggestion",
+        notebookId: uuid(raw.notebook_id, "notebook_id"),
+        cellId: matching(raw.cell_id, CELL_ID, "cell_id"),
+        requestId: uuid(raw.request_id, "request_id"),
+        suggestionId: uuid(raw.suggestion_id, "suggestion_id"),
+      };
+    case "ai_failed": {
+      const message = raw.message;
+      if (typeof message !== "string" || [...message].length > MAX_AI_MESSAGE_LENGTH) {
+        throw new InvalidEvent("bad message");
+      }
+      return {
+        type: "ai_failed",
+        notebookId: uuid(raw.notebook_id, "notebook_id"),
+        cellId: matching(raw.cell_id, CELL_ID, "cell_id"),
+        requestId: uuid(raw.request_id, "request_id"),
+        message,
+      };
+    }
+    case "ai_resolved":
+      return {
+        type: "ai_resolved",
+        notebookId: uuid(raw.notebook_id, "notebook_id"),
+        cellId: matching(raw.cell_id, CELL_ID, "cell_id"),
+        suggestionId: uuid(raw.suggestion_id, "suggestion_id"),
+        decision: oneOf(raw.decision, DECISIONS, "decision"),
+      };
     default:
       return null;
   }

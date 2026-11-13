@@ -17,7 +17,14 @@
  *                           an editor's own client writing it too (editors
  *                           can change anything in the document), so it's a
  *                           display hint, not proof of who ran what.
- *     cell.get("chart")     Y.Map, for chart cells: the ChartConfig,
+ *     cell.get("ai")        AiState | null, for sql cells: what the AI
+ *                           assistant is doing for the cell (thinking, a
+ *                           suggestion waiting for a decision, or a
+ *                           failure), written by the sync server from the
+ *                           API's events. Like `running`, editors could
+ *                           write it too, so it's read defensively and a
+ *                           suggestion is only decided through the API.
+ *     cell.get("chart")    Y.Map, for chart cells: the ChartConfig,
  *                           one entry per field (see chart.ts)
  *
  * Why a map plus an `order` string, not a Y.Array of cells: Yjs arrays have no
@@ -49,6 +56,35 @@ export interface RunningState {
   expiresAt: string | null;
 }
 
+export const AI_KINDS = ["generate", "fix", "explain"] as const;
+export type AiKind = (typeof AI_KINDS)[number];
+
+/** The AI assistant's state on a sql cell, as the sync server recorded it. */
+export type AiState =
+  | {
+      status: "thinking";
+      requestId: string;
+      kind: AiKind;
+      /** Display name of whoever asked. */
+      by: string;
+      startedAt: string | null;
+    }
+  | {
+      status: "suggestion";
+      requestId: string;
+      suggestionId: string;
+      kind: AiKind;
+      /** The suggested SQL; null for an explanation. */
+      sql: string | null;
+      explanation: string;
+      /** The cell's SQL the request was about (fix, explain); null for generate. */
+      baseSql: string | null;
+      /** Whether the suggested SQL passed validation (parse and plan) on the database. */
+      valid: boolean;
+      by: string;
+    }
+  | { status: "failed"; requestId: string; message: string };
+
 export interface CellView {
   id: string;
   type: CellType;
@@ -60,6 +96,8 @@ export interface CellView {
   chart: ChartConfig | null;
   /** A run in progress, for sql cells; null otherwise. */
   running: RunningState | null;
+  /** The AI assistant's state, for sql cells; null otherwise or when there is none. */
+  ai: AiState | null;
 }
 
 const CELLS_KEY = "cells";
@@ -122,6 +160,7 @@ function readCell(id: string, cell: unknown): CellView | null {
     lastRunId: typeof lastRunId === "string" ? lastRunId : null,
     chart: type === "chart" ? readChartConfig(cell.get("chart")) : null,
     running: type === "sql" ? readRunning(cell.get("running")) : null,
+    ai: type === "sql" ? readAi(cell.get("ai")) : null,
   };
 }
 
@@ -142,6 +181,90 @@ export function readRunning(value: unknown): RunningState | null {
     startedAt,
     expiresAt: shortString(expiresAt) ? expiresAt : null,
   };
+}
+
+// Same caps as the sync server applies before writing a suggestion (UTF-16
+// units). The API keeps these far smaller; anything bigger is malformed.
+export const MAX_AI_SQL_LENGTH = 100_000;
+export const MAX_AI_EXPLANATION_LENGTH = 10_000;
+// The server's own failure messages, and the API's (at most 300 characters).
+const MAX_AI_MESSAGE_LENGTH = 1_000;
+
+const boundedString = (value: unknown, max: number): value is string =>
+  typeof value === "string" && value.length <= max;
+const sqlOrNull = (value: unknown): value is string | null =>
+  value === null || boundedString(value, MAX_AI_SQL_LENGTH);
+
+/**
+ * Reads a cell's `ai` entry, or null if it's absent or malformed. Every field
+ * is checked, because the UI shows them and acts on them (Accept writes the
+ * suggested SQL into the cell).
+ */
+export function readAi(value: unknown): AiState | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (!shortString(v.requestId) || !v.requestId) return null;
+  switch (v.status) {
+    case "thinking":
+      if (!AI_KINDS.includes(v.kind as AiKind) || !shortString(v.by)) return null;
+      return {
+        status: "thinking",
+        requestId: v.requestId,
+        kind: v.kind as AiKind,
+        by: v.by,
+        startedAt: shortString(v.startedAt) ? v.startedAt : null,
+      };
+    case "suggestion":
+      if (
+        !shortString(v.suggestionId) ||
+        !v.suggestionId ||
+        !AI_KINDS.includes(v.kind as AiKind) ||
+        !sqlOrNull(v.sql) ||
+        !sqlOrNull(v.baseSql) ||
+        !boundedString(v.explanation, MAX_AI_EXPLANATION_LENGTH) ||
+        typeof v.valid !== "boolean" ||
+        !shortString(v.by)
+      ) {
+        return null;
+      }
+      return {
+        status: "suggestion",
+        requestId: v.requestId,
+        suggestionId: v.suggestionId,
+        kind: v.kind as AiKind,
+        sql: v.sql,
+        explanation: v.explanation,
+        baseSql: v.baseSql,
+        valid: v.valid,
+        by: v.by,
+      };
+    case "failed":
+      if (!boundedString(v.message, MAX_AI_MESSAGE_LENGTH)) return null;
+      return { status: "failed", requestId: v.requestId, message: v.message };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Accepting a suggestion: replaces the cell's whole text with `sql` in one
+ * transaction made by this client, so it's the accepting person's own edit
+ * (their editor's undo reverts it in one step) and collaborators see one
+ * change. Does nothing if the text already is `sql` (someone accepted it
+ * first). Returns whether it changed the text.
+ */
+export function replaceCellText(doc: Y.Doc, id: string, sql: string): boolean {
+  let changed = false;
+  doc.transact(() => {
+    const cell = cellsMap(doc).get(id);
+    const source = cell?.get("source");
+    if (!cell || cell.get("type") !== "sql" || !(source instanceof Y.Text)) return;
+    if (source.toString() === sql) return;
+    source.delete(0, source.length);
+    source.insert(0, sql);
+    changed = true;
+  });
+  return changed;
 }
 
 /** Whether a run is still in progress at `now` (ms since epoch). */

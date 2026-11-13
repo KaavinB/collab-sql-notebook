@@ -17,6 +17,12 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 // above that total; if those server settings are raised, raise this too, or
 // the client gives up on a run the server still completes and stores.
 const RUN_TIMEOUT_MS = 60_000;
+// Asking the AI assistant: the API answers once it's done, after up to three
+// model calls, each SQL answer validated on a query worker. The sync server
+// treats a request still running after two minutes as dead, so waiting longer
+// than that is pointless; this leaves a little margin past it. Everyone (the
+// asker too) follows the request through the document meanwhile.
+const AI_TIMEOUT_MS = 130_000;
 
 export const ROLES = ["owner", "editor", "viewer"] as const;
 export type Role = (typeof ROLES)[number];
@@ -120,6 +126,33 @@ export const syncTicketSchema = z.object({
   role: z.enum(ROLES),
 });
 export type SyncTicket = z.infer<typeof syncTicketSchema>;
+
+/** What the AI assistant is asked to do for a cell. Lengths are the API's limits. */
+export const AI_LIMITS = { prompt: 2_000, sql: 20_000, error: 4_000 } as const;
+export type AiRequest =
+  | { kind: "generate"; prompt: string }
+  | { kind: "fix"; sql: string; error: string }
+  | { kind: "explain"; sql: string };
+
+export const SUGGESTION_STATUSES = ["pending", "accepted", "rejected"] as const;
+export type Decision = "accepted" | "rejected";
+
+/** A suggestion from the AI assistant, as stored. */
+export const suggestionSchema = z.object({
+  id: z.uuid(),
+  cell_id: z.string(),
+  kind: z.enum(["generate", "fix", "explain"]),
+  status: z.enum(SUGGESTION_STATUSES),
+  /** Null for an explanation. */
+  sql: z.string().nullable(),
+  explanation: z.string(),
+  /** The cell's SQL the request was about (fix, explain); null for generate. */
+  base_sql: z.string().nullable(),
+  /** Whether the SQL passed validation (parse and plan) on the database. */
+  valid: z.boolean(),
+  created_at: z.string(),
+});
+export type Suggestion = z.infer<typeof suggestionSchema>;
 
 const errorBodySchema = z.object({
   detail: z.object({ kind: z.string(), message: z.string() }),
@@ -317,6 +350,43 @@ export function createApiClient(options: ApiClientOptions = {}) {
     async removeMember(notebookId: string, userId: string): Promise<void> {
       const path = `/notebooks/${encodeURIComponent(notebookId)}/members/${encodeURIComponent(userId)}`;
       await request(path, { method: "DELETE" });
+    },
+    /**
+     * Asks the AI assistant to write, fix or explain a cell's SQL. Resolves
+     * with the stored suggestion once it's done; meanwhile, and afterwards,
+     * every member sees the request and its suggestion through the document.
+     * Fails with kind "busy" (409) if the cell already has a request in
+     * flight, "rate_limited" (429), or "unavailable" (503, no AI configured).
+     * Aborting only stops waiting: the server finishes the request anyway.
+     */
+    async askAi(
+      notebookId: string,
+      cellId: string,
+      body: AiRequest,
+      signal?: AbortSignal,
+    ): Promise<Suggestion> {
+      const path = `/notebooks/${encodeURIComponent(notebookId)}/cells/${encodeURIComponent(cellId)}/ai`;
+      return json(
+        suggestionSchema,
+        await request(path, {
+          method: "POST",
+          ...jsonBody(body),
+          timeoutMs: AI_TIMEOUT_MS,
+          signal,
+        }),
+      );
+    },
+    /** Records accepting or rejecting a pending suggestion (409 if it was already decided). */
+    async decideSuggestion(
+      notebookId: string,
+      suggestionId: string,
+      decision: Decision,
+    ): Promise<Suggestion> {
+      const path = `/notebooks/${encodeURIComponent(notebookId)}/ai/suggestions/${encodeURIComponent(suggestionId)}/decision`;
+      return json(
+        suggestionSchema,
+        await request(path, { method: "POST", ...jsonBody({ decision }) }),
+      );
     },
     /** A short-lived ticket for connecting to the sync server. */
     async syncTicket(notebookId: string): Promise<SyncTicket> {
