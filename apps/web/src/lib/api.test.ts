@@ -177,6 +177,114 @@ describe("api client", () => {
     expect(JSON.parse(init?.body as string)).toEqual({ sql: "select 1" });
   });
 
+  it("accepts a joined run (200) exactly like a fresh one (201)", async () => {
+    const run = {
+      id: "748e72ab-e87e-4182-9106-f09d48615e34",
+      cell_id: "cell-1",
+      sql: "select 'someone else''s edit'",
+      status: "error",
+      result: null,
+      error: { kind: "error", message: "Binder Error" },
+      created_at: "2026-11-13T07:00:00Z",
+    };
+    const { api } = client(json(run, 200));
+    expect(await api.runCell(NOTEBOOK.id, "cell-1", "select 1")).toEqual(run);
+  });
+
+  describe("sharing", () => {
+    const LINK = {
+      id: "2b1f8a52-8a8e-4f43-9e0e-5d2f7f0c1a11",
+      role: "editor",
+      created_at: "2026-11-13T07:00:00Z",
+    };
+    const TOKEN = "q3Jb2xk9V0yZ7cR1mN5pT8wL4hF6dS2aE0uI9oK3jG7";
+    const MEMBER = {
+      user_id: "0b0f3c50-61c4-4b2a-9d39-5d1f2a7f3e10",
+      name: "Ada",
+      role: "viewer",
+    };
+
+    it("creates a link and returns its token", async () => {
+      const { api, fetchMock } = client(json({ ...LINK, token: TOKEN }, 201));
+      expect(await api.createShareLink(NOTEBOOK.id, "editor")).toEqual({ ...LINK, token: TOKEN });
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${BASE}/notebooks/${NOTEBOOK.id}/share-links`);
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(init?.body as string)).toEqual({ role: "editor" });
+    });
+
+    it("rejects a created link without a usable token", async () => {
+      const { api } = client(json({ ...LINK, token: "has spaces in it, not a token" }, 201));
+      await expect(api.createShareLink(NOTEBOOK.id, "editor")).rejects.toMatchObject({
+        kind: "invalid_response",
+      });
+    });
+
+    it("lists and revokes links", async () => {
+      const { api, fetchMock } = client(json([LINK]), new Response(null, { status: 204 }));
+      expect(await api.listShareLinks(NOTEBOOK.id)).toEqual([LINK]);
+      await api.revokeShareLink(NOTEBOOK.id, LINK.id);
+      expect(fetchMock.mock.calls[1][0]).toBe(
+        `${BASE}/notebooks/${NOTEBOOK.id}/share-links/${LINK.id}`,
+      );
+      expect(fetchMock.mock.calls[1][1]?.method).toBe("DELETE");
+    });
+
+    it("never accepts an owner link from the server", async () => {
+      const { api } = client(json([{ ...LINK, role: "owner" }]));
+      await expect(api.listShareLinks(NOTEBOOK.id)).rejects.toMatchObject({
+        kind: "invalid_response",
+      });
+    });
+
+    it("accepts a link by its token", async () => {
+      const accepted = { notebook_id: NOTEBOOK.id, role: "editor" };
+      const { api, fetchMock } = client(json(accepted));
+      expect(await api.acceptShareLink(TOKEN)).toEqual(accepted);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(`${BASE}/share-links/accept`);
+      expect(JSON.parse(init?.body as string)).toEqual({ token: TOKEN });
+    });
+
+    it("lists, re-roles and removes members", async () => {
+      const { api, fetchMock } = client(
+        json([MEMBER]),
+        json({ ...MEMBER, role: "editor" }),
+        new Response(null, { status: 204 }),
+      );
+      expect(await api.listMembers(NOTEBOOK.id)).toEqual([MEMBER]);
+      expect(await api.updateMember(NOTEBOOK.id, MEMBER.user_id, "editor")).toEqual({
+        ...MEMBER,
+        role: "editor",
+      });
+      await api.removeMember(NOTEBOOK.id, MEMBER.user_id);
+      const memberUrl = `${BASE}/notebooks/${NOTEBOOK.id}/members/${MEMBER.user_id}`;
+      expect(fetchMock.mock.calls[1][0]).toBe(memberUrl);
+      expect(fetchMock.mock.calls[1][1]?.method).toBe("PATCH");
+      expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toEqual({ role: "editor" });
+      expect(fetchMock.mock.calls[2][0]).toBe(memberUrl);
+      expect(fetchMock.mock.calls[2][1]?.method).toBe("DELETE");
+    });
+
+    it("gets a sync ticket", async () => {
+      const ticket = { ticket: "abc.def", url: "ws://localhost:8020", role: "viewer" };
+      const { api, fetchMock } = client(json(ticket));
+      expect(await api.syncTicket(NOTEBOOK.id)).toEqual(ticket);
+      expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/notebooks/${NOTEBOOK.id}/sync-ticket`);
+      expect(fetchMock.mock.calls[0][1]?.method).toBe("POST");
+    });
+
+    it.each(["http://localhost:8020", "javascript:alert(1)", "ws://"])(
+      "refuses a sync URL that isn't a WebSocket URL (%s)",
+      async (url) => {
+        const { api } = client(json({ ticket: "abc.def", url, role: "viewer" }));
+        await expect(api.syncTicket(NOTEBOOK.id)).rejects.toMatchObject({
+          kind: "invalid_response",
+        });
+      },
+    );
+  });
+
   it("encodes path segments", async () => {
     const { api, fetchMock } = client(json(NOTEBOOK));
     await api.getNotebook("a/../b");

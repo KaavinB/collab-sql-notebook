@@ -12,6 +12,9 @@ export const NOTEBOOK: Notebook = {
 
 export const USER: User = { id: "0b0f3c50-61c4-4b2a-9d39-5d1f2a7f3e10", name: "Ada" };
 
+/** A share link token, shaped like the API's (43 base64url characters). */
+export const SHARE_TOKEN = "q3Jb2xk9V0yZ7cR1mN5pT8wL4hF6dS2aE0uI9oK3jG7";
+
 export function okRun(id: string, value: unknown, cellId = "c1"): Run {
   return {
     id,
@@ -52,6 +55,32 @@ export function fakeApi(overrides: Partial<ApiClient> = {}) {
     saveSnapshot: vi.fn<ApiClient["saveSnapshot"]>(async () => {}),
     runCell: vi.fn<ApiClient["runCell"]>(async () => okRun("r1", 1)),
     getRun: vi.fn<ApiClient["getRun"]>(async (_nb, id) => okRun(id, 1)),
+    createShareLink: vi.fn<ApiClient["createShareLink"]>(async (_nb, role) => ({
+      id: "2b1f8a52-8a8e-4f43-9e0e-5d2f7f0c1a11",
+      role,
+      created_at: "2026-11-13T07:00:00Z",
+      token: SHARE_TOKEN,
+    })),
+    listShareLinks: vi.fn<ApiClient["listShareLinks"]>(async () => []),
+    revokeShareLink: vi.fn<ApiClient["revokeShareLink"]>(async () => {}),
+    acceptShareLink: vi.fn<ApiClient["acceptShareLink"]>(async () => ({
+      notebook_id: NOTEBOOK.id,
+      role: "editor",
+    })),
+    listMembers: vi.fn<ApiClient["listMembers"]>(async () => [
+      { user_id: USER.id, name: USER.name, role: "owner" },
+    ]),
+    updateMember: vi.fn<ApiClient["updateMember"]>(async (_nb, userId, role) => ({
+      user_id: userId,
+      name: "Someone",
+      role,
+    })),
+    removeMember: vi.fn<ApiClient["removeMember"]>(async () => {}),
+    syncTicket: vi.fn<ApiClient["syncTicket"]>(async () => ({
+      ticket: "ticket",
+      url: "ws://localhost:8020",
+      role: "owner",
+    })),
     ...overrides,
   };
   return api satisfies ApiClient;

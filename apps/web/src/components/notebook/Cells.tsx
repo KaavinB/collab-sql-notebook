@@ -20,6 +20,8 @@ interface CellFrameProps {
   onMove: (direction: "up" | "down") => void;
   onDelete: () => void;
   actions?: React.ReactNode;
+  /** View only: no move or delete buttons. */
+  readOnly?: boolean;
   children: React.ReactNode;
 }
 
@@ -30,11 +32,9 @@ export function CellFrame({
   onMove,
   onDelete,
   actions,
+  readOnly = false,
   children,
 }: CellFrameProps) {
-  // Deleting takes two clicks: Yjs undo only covers text, so a deleted cell
-  // can't be undone (a known Phase 1 limitation).
-  const [confirming, setConfirming] = useState(false);
   return (
     <section
       aria-label={`${cell.type} cell ${index + 1}`}
@@ -45,44 +45,62 @@ export function CellFrame({
         <span className="font-mono text-xs uppercase text-zinc-500">{cell.type}</span>
         <div className="ml-auto flex items-center gap-1">
           {actions}
-          <button
-            className={button}
-            onClick={() => onMove("up")}
-            disabled={index === 0}
-            aria-label="Move cell up"
-          >
-            ↑
-          </button>
-          <button
-            className={button}
-            onClick={() => onMove("down")}
-            disabled={index === count - 1}
-            aria-label="Move cell down"
-          >
-            ↓
-          </button>
-          {confirming ? (
-            <>
-              <button
-                className={`${button} border-red-500 text-red-600`}
-                onClick={onDelete}
-                aria-label="Confirm delete cell"
-              >
-                Confirm delete
-              </button>
-              <button className={button} onClick={() => setConfirming(false)}>
-                Cancel
-              </button>
-            </>
-          ) : (
-            <button className={button} onClick={() => setConfirming(true)} aria-label="Delete cell">
-              Delete
-            </button>
+          {!readOnly && (
+            <CellEditButtons index={index} count={count} onMove={onMove} onDelete={onDelete} />
           )}
         </div>
       </header>
       {children}
     </section>
+  );
+}
+
+function CellEditButtons({
+  index,
+  count,
+  onMove,
+  onDelete,
+}: Pick<CellFrameProps, "index" | "count" | "onMove" | "onDelete">) {
+  // Deleting takes two clicks: Yjs undo only covers text, so a deleted cell
+  // can't be undone (a known Phase 1 limitation).
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <>
+      <button
+        className={button}
+        onClick={() => onMove("up")}
+        disabled={index === 0}
+        aria-label="Move cell up"
+      >
+        ↑
+      </button>
+      <button
+        className={button}
+        onClick={() => onMove("down")}
+        disabled={index === count - 1}
+        aria-label="Move cell down"
+      >
+        ↓
+      </button>
+      {confirming ? (
+        <>
+          <button
+            className={`${button} border-red-500 text-red-600`}
+            onClick={onDelete}
+            aria-label="Confirm delete cell"
+          >
+            Confirm delete
+          </button>
+          <button className={button} onClick={() => setConfirming(false)}>
+            Cancel
+          </button>
+        </>
+      ) : (
+        <button className={button} onClick={() => setConfirming(true)} aria-label="Delete cell">
+          Delete
+        </button>
+      )}
+    </>
   );
 }
 
@@ -106,6 +124,8 @@ interface SqlCellProps {
   loadFailures: Map<string, RunLoadFailure>;
   ensureRun: (runId: string) => void;
   onRun: () => void;
+  /** View only: the SQL can't be edited or run (Mod-Enter does nothing). */
+  readOnly?: boolean;
 }
 
 export function SqlCellBody({
@@ -116,6 +136,7 @@ export function SqlCellBody({
   loadFailures,
   ensureRun,
   onRun,
+  readOnly = false,
 }: SqlCellProps) {
   const run = useLatestRun(cell.lastRunId, runs, ensureRun);
   const loadFailure = cell.lastRunId ? loadFailures.get(cell.lastRunId) : undefined;
@@ -129,7 +150,8 @@ export function SqlCellBody({
         text={source}
         language="sql"
         placeholderText="select * from trips limit 10"
-        onSubmit={onRun}
+        onSubmit={readOnly ? undefined : onRun}
+        readOnly={readOnly}
       />
       {state.status === "running" && (
         <p className="text-xs text-zinc-500" role="status">
@@ -140,7 +162,8 @@ export function SqlCellBody({
       )}
       {stale && state.status !== "running" && (
         <p className="text-xs text-amber-700" data-testid="stale-result">
-          This result is from an earlier version of the query. Run the cell to update it.
+          This result is from an earlier version of the query.
+          {readOnly ? "" : " Run the cell to update it."}
         </p>
       )}
       {state.status === "failed" && (
@@ -158,7 +181,7 @@ export function SqlCellBody({
       )}
       {!run && loadFailure === "missing" && (
         <p className="text-xs text-zinc-500">
-          The last result is no longer stored. Run the cell again.
+          The last result is no longer stored.{readOnly ? "" : " Run the cell again."}
         </p>
       )}
       {run?.status === "ok" && <ResultTable result={run.result} />}
@@ -188,9 +211,23 @@ export function RunButton({ state, onRun }: { state: RunState; onRun: () => void
   );
 }
 
-export function MarkdownCellBody({ source }: { source: Y.Text }) {
+export function MarkdownCellBody({
+  source,
+  readOnly = false,
+}: {
+  source: Y.Text;
+  /** View only: always the rendered preview, never the editor. */
+  readOnly?: boolean;
+}) {
   const [editing, setEditing] = useState(source.length === 0);
   const text = useText(source);
+  if (readOnly) {
+    return text.trim() ? (
+      <MarkdownPreview source={text} />
+    ) : (
+      <p className="text-sm text-zinc-500">Empty markdown cell.</p>
+    );
+  }
   if (editing) {
     return (
       <div className="space-y-1">

@@ -82,10 +82,20 @@ export function NotebookList() {
             <Link href={`/notebooks/${notebook.id}`} className="flex-1 hover:underline">
               {notebook.title}
             </Link>
+            {/* Shared with you: say how. Your own notebooks need no label. */}
+            {notebook.role !== "owner" && (
+              <span
+                className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                data-testid="notebook-role"
+              >
+                {notebook.role}
+              </span>
+            )}
             <span className="text-xs text-zinc-500">
               {new Date(notebook.updated_at).toLocaleString()}
             </span>
-            {confirming === notebook.id ? (
+            {/* Only the owner can delete; others can leave from the notebook's Share panel. */}
+            {notebook.role !== "owner" ? null : confirming === notebook.id ? (
               <span className="flex gap-1">
                 <button
                   onClick={() => void remove(notebook.id)}

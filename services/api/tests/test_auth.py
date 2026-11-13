@@ -339,8 +339,20 @@ def test_every_notebook_route_needs_a_session(client: TestClient) -> None:
         ("PUT", f"/notebooks/{some_id}/snapshot"),
         ("POST", f"/notebooks/{some_id}/cells/c1/runs"),
         ("GET", f"/notebooks/{some_id}/runs/{some_id}"),
+        ("POST", f"/notebooks/{some_id}/share-links"),
+        ("GET", f"/notebooks/{some_id}/share-links"),
+        ("DELETE", f"/notebooks/{some_id}/share-links/{some_id}"),
+        ("POST", "/share-links/accept"),
+        ("GET", f"/notebooks/{some_id}/members"),
+        ("PATCH", f"/notebooks/{some_id}/members/{some_id}"),
+        ("DELETE", f"/notebooks/{some_id}/members/{some_id}"),
+        ("POST", f"/notebooks/{some_id}/sync-ticket"),
     ]:
-        body = {"title": "x", "sql": "select 1"} if method in ("POST", "PATCH") else None
+        body = (
+            {"title": "x", "sql": "select 1", "role": "viewer", "token": "t"}
+            if method in ("POST", "PATCH")
+            else None
+        )
         response = client.request(
             method, path, json=body, content=b"x" if method == "PUT" else None
         )

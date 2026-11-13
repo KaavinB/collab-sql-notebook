@@ -75,6 +75,31 @@ describe("NotebookList", () => {
     expect(deleteNotebook).toHaveBeenCalledTimes(2);
   });
 
+  it("labels notebooks shared with you and lets only the owner delete", async () => {
+    const shared = (id: string, title: string, role: Notebook["role"]): Notebook => ({
+      ...NOTEBOOK,
+      id,
+      title,
+      role,
+    });
+    api = fakeApi({
+      listNotebooks: async () => [
+        NOTEBOOK,
+        shared("8c7f1f8e-5d22-4b7e-8f3c-1f2e3d4c5b6a", "Team notes", "editor"),
+        shared("9d8e2a9f-6e33-4c8f-9a4d-2a3b4c5d6e7f", "Read me", "viewer"),
+      ],
+    });
+    render(<NotebookList />);
+    await screen.findByRole("link", { name: "Team notes" });
+    expect(screen.getAllByTestId("notebook-role").map((el) => el.textContent)).toEqual([
+      "editor",
+      "viewer",
+    ]);
+    expect(screen.getByRole("button", { name: `Delete ${NOTEBOOK.title}` })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Delete Team notes" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete Read me" })).toBeNull();
+  });
+
   it("does nothing until the delete is confirmed", async () => {
     api = fakeApi();
     render(<NotebookList />);

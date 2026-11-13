@@ -82,6 +82,45 @@ export const runSchema = z.discriminatedUnion("status", [
 ]);
 export type Run = z.infer<typeof runSchema>;
 
+/** Roles a share link can carry, or that the owner can give: never "owner". */
+export const SHARED_ROLES = ["editor", "viewer"] as const;
+export type SharedRole = (typeof SHARED_ROLES)[number];
+
+export const shareLinkSchema = z.object({
+  id: z.uuid(),
+  role: z.enum(SHARED_ROLES),
+  created_at: z.string(),
+});
+export type ShareLink = z.infer<typeof shareLinkSchema>;
+
+/** A just-created link. The token is only ever returned here, once. */
+export const createdShareLinkSchema = shareLinkSchema.extend({
+  token: z.string().regex(/^[A-Za-z0-9_-]{20,200}$/),
+});
+export type CreatedShareLink = z.infer<typeof createdShareLinkSchema>;
+
+const acceptedShareLinkSchema = z.object({
+  notebook_id: z.uuid(),
+  /** The role the user has now, which may be higher than the link's. */
+  role: z.enum(ROLES),
+});
+export type AcceptedShareLink = z.infer<typeof acceptedShareLinkSchema>;
+
+export const memberSchema = z.object({
+  user_id: z.uuid(),
+  name: z.string(),
+  role: z.enum(ROLES),
+});
+export type Member = z.infer<typeof memberSchema>;
+
+export const syncTicketSchema = z.object({
+  ticket: z.string().min(1),
+  /** The sync server's WebSocket URL; anything else is refused. */
+  url: z.string().regex(/^wss?:\/\/\S+$/),
+  role: z.enum(ROLES),
+});
+export type SyncTicket = z.infer<typeof syncTicketSchema>;
+
 const errorBodySchema = z.object({
   detail: z.object({ kind: z.string(), message: z.string() }),
 });
@@ -223,6 +262,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
      * server keeps running the query (holding one of its workers) and stores
      * the run. So the UI never aborts to start another run; it aborts only
      * when the page goes away.
+     *
+     * If the cell is already running (someone else pressed Run), the server
+     * doesn't run it again: it waits for that run and returns it (HTTP 200
+     * instead of 201). Its SQL may differ from `sql`; the UI already marks a
+     * result whose SQL differs from the editor's.
      */
     async runCell(
       notebookId: string,
@@ -244,6 +288,57 @@ export function createApiClient(options: ApiClientOptions = {}) {
     async getRun(notebookId: string, runId: string): Promise<Run> {
       const path = `/notebooks/${encodeURIComponent(notebookId)}/runs/${encodeURIComponent(runId)}`;
       return json(runSchema, await request(path));
+    },
+    /** Owner only. The returned token is shown once; the server keeps only its hash. */
+    async createShareLink(notebookId: string, role: SharedRole): Promise<CreatedShareLink> {
+      return json(
+        createdShareLinkSchema,
+        await request(`/notebooks/${encodeURIComponent(notebookId)}/share-links`, {
+          method: "POST",
+          ...jsonBody({ role }),
+        }),
+      );
+    },
+    async listShareLinks(notebookId: string): Promise<ShareLink[]> {
+      return json(
+        z.array(shareLinkSchema),
+        await request(`/notebooks/${encodeURIComponent(notebookId)}/share-links`),
+      );
+    },
+    async revokeShareLink(notebookId: string, linkId: string): Promise<void> {
+      const path = `/notebooks/${encodeURIComponent(notebookId)}/share-links/${encodeURIComponent(linkId)}`;
+      await request(path, { method: "DELETE" });
+    },
+    /** Joins a notebook through a share link's token. Never lowers an existing role. */
+    async acceptShareLink(token: string): Promise<AcceptedShareLink> {
+      return json(
+        acceptedShareLinkSchema,
+        await request("/share-links/accept", { method: "POST", ...jsonBody({ token }) }),
+      );
+    },
+    async listMembers(notebookId: string): Promise<Member[]> {
+      return json(
+        z.array(memberSchema),
+        await request(`/notebooks/${encodeURIComponent(notebookId)}/members`),
+      );
+    },
+    async updateMember(notebookId: string, userId: string, role: SharedRole): Promise<Member> {
+      const path = `/notebooks/${encodeURIComponent(notebookId)}/members/${encodeURIComponent(userId)}`;
+      return json(memberSchema, await request(path, { method: "PATCH", ...jsonBody({ role }) }));
+    },
+    /** The owner removes someone, or a member removes themself (leaves). */
+    async removeMember(notebookId: string, userId: string): Promise<void> {
+      const path = `/notebooks/${encodeURIComponent(notebookId)}/members/${encodeURIComponent(userId)}`;
+      await request(path, { method: "DELETE" });
+    },
+    /** A short-lived ticket for connecting to the sync server. */
+    async syncTicket(notebookId: string): Promise<SyncTicket> {
+      return json(
+        syncTicketSchema,
+        await request(`/notebooks/${encodeURIComponent(notebookId)}/sync-ticket`, {
+          method: "POST",
+        }),
+      );
     },
   };
 }

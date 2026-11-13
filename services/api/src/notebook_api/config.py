@@ -93,6 +93,16 @@ class Settings(BaseSettings):
     # development only. Refused unless the API listens on loopback only.
     auth_dev_login: bool = False
 
+    # --- Live collaboration (the sync server) ---
+    # Signs the short-lived tickets the browser shows the sync server when it
+    # connects. The sync server is configured with the same value. At least
+    # 32 characters and different from AUTH_SECRET, so a leak of one doesn't
+    # expose the other. Unset means the sync-ticket route answers 503.
+    sync_ticket_secret: SecretStr | None = None
+    # The sync server's WebSocket URL as browsers reach it (ws:// or wss://).
+    # Handed to the browser together with each ticket.
+    sync_public_url: str = "ws://localhost:8020"
+
     @field_validator("web_url", "api_public_url")
     @classmethod
     def _bare_origin_url(cls, value: str) -> str:
@@ -109,6 +119,33 @@ class Settings(BaseSettings):
         if value is not None and len(value.get_secret_value()) < 32:
             raise ValueError("AUTH_SECRET must be at least 32 characters")
         return value
+
+    @field_validator("sync_public_url")
+    @classmethod
+    def _websocket_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("ws", "wss") or not parts.hostname:
+            raise ValueError("SYNC_PUBLIC_URL must be a ws:// or wss:// URL")
+        if parts.query or parts.fragment or parts.username or parts.password:
+            raise ValueError("SYNC_PUBLIC_URL must not contain credentials, a query or a fragment")
+        return value.rstrip("/")
+
+    @field_validator("sync_ticket_secret")
+    @classmethod
+    def _long_sync_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value()) < 32:
+            raise ValueError("SYNC_TICKET_SECRET must be at least 32 characters")
+        return value
+
+    @model_validator(mode="after")
+    def _sync_secret_is_its_own(self) -> Self:
+        if (
+            self.sync_ticket_secret is not None
+            and self.auth_secret is not None
+            and self.sync_ticket_secret.get_secret_value() == self.auth_secret.get_secret_value()
+        ):
+            raise ValueError("SYNC_TICKET_SECRET must differ from AUTH_SECRET")
+        return self
 
     @model_validator(mode="after")
     def _web_url_is_an_allowed_origin(self) -> Self:

@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -80,6 +81,10 @@ class CellRun(Base):
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     error: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # The execution (see CellExecution) that produced this run. Someone who
+    # pressed Run while that execution was in flight finds the run by it.
+    # Null for runs stored before the execution lock existed.
+    execution_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
 
 
 class User(Base):
@@ -132,6 +137,14 @@ class NotebookMember(Base):
     __tablename__ = "notebook_members"
     __table_args__ = (
         CheckConstraint("role IN ('owner', 'editor', 'viewer')", name="ck_notebook_members_role"),
+        # Exactly one owner per notebook: the API never makes a second one,
+        # and this makes sure no bug can either.
+        Index(
+            "uq_notebook_members_one_owner",
+            "notebook_id",
+            unique=True,
+            postgresql_where=text("role = 'owner'"),
+        ),
     )
 
     notebook_id: Mapped[uuid.UUID] = mapped_column(
@@ -142,3 +155,50 @@ class NotebookMember(Base):
     )
     role: Mapped[str] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class ShareLink(Base):
+    """A link that adds whoever opens it (signed in) to a notebook with a role.
+
+    Like sessions, only the SHA-256 of the random token is stored, so the
+    table can't be used to mint working links. Revoking deletes the row.
+    """
+
+    __tablename__ = "share_links"
+    __table_args__ = (
+        # Owner is never shareable: a notebook has exactly one owner.
+        CheckConstraint("role IN ('editor', 'viewer')", name="ck_share_links_role"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    notebook_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("notebooks.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, unique=True)
+    role: Mapped[str] = mapped_column(String(16))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class CellExecution(Base):
+    """The per-cell execution lock: at most one in-flight run per cell.
+
+    A row exists while a cell's query runs. Pressing Run while it exists
+    joins that execution instead of starting another. `expires_at` bounds a
+    row left behind by a crashed API process: after it, the lock can be taken.
+    """
+
+    __tablename__ = "cell_executions"
+
+    notebook_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("notebooks.id", ondelete="CASCADE"), primary_key=True
+    )
+    cell_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    execution_id: Mapped[uuid.UUID]
+    started_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    started_at: Mapped[datetime]
+    expires_at: Mapped[datetime]

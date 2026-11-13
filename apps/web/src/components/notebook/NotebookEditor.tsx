@@ -11,6 +11,7 @@ import {
   type SqlCellOption,
 } from "@/components/notebook/ChartCell";
 import { useRuns } from "@/components/notebook/useRuns";
+import { SharePanel } from "@/components/sharing/SharePanel";
 import { ApiError, createApiClient, type ApiClient, type Notebook } from "@/lib/api";
 import { attachAutosave, LOAD_ORIGIN, type Autosave } from "@/lib/notebook/autosave";
 import { writeChartConfig, type ChartConfig } from "@/lib/notebook/chart";
@@ -157,6 +158,9 @@ function LoadedNotebook({
   saveState: SaveStateStore;
 }) {
   const { doc, notebook } = loaded;
+  // Viewers read; the API refuses their writes anyway, and the sync server
+  // drops their document updates. The UI just doesn't offer them.
+  const readOnly = notebook.role === "viewer";
   const cells = useCells(doc);
   const { runs, loadFailures, cellStates, ensureRun, runCell } = useRuns(api, notebook.id);
   // SQL cells a chart can draw from, labelled by their position. (Not by their
@@ -175,12 +179,27 @@ function LoadedNotebook({
         <Link href="/" className="text-sm text-zinc-500 hover:underline">
           ← Notebooks
         </Link>
+        {readOnly && (
+          <span
+            className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+            data-testid="view-only"
+          >
+            View only
+          </span>
+        )}
         <SaveStatusLabel store={saveState} />
       </div>
-      <TitleEditor api={api} notebook={notebook} />
+      {readOnly ? (
+        <h1 className="text-2xl font-semibold tracking-tight">{notebook.title}</h1>
+      ) : (
+        <TitleEditor api={api} notebook={notebook} />
+      )}
+      <SharePanel api={api} notebook={notebook} />
 
       {cells.length === 0 && (
-        <p className="text-sm text-zinc-500">This notebook is empty. Add a cell to start.</p>
+        <p className="text-sm text-zinc-500">
+          {readOnly ? "This notebook is empty." : "This notebook is empty. Add a cell to start."}
+        </p>
       )}
       {cells.map((cell, index) => (
         <Cell
@@ -196,10 +215,11 @@ function LoadedNotebook({
           runCell={runCell}
           sqlCells={sqlCells}
           cells={cells}
+          readOnly={readOnly}
         />
       ))}
 
-      <AddCellButtons onAdd={(type) => appendCell(doc, type)} />
+      {!readOnly && <AddCellButtons onAdd={(type) => appendCell(doc, type)} />}
     </div>
   );
 }
@@ -216,11 +236,13 @@ function Cell({
   runCell,
   sqlCells,
   cells,
+  readOnly,
 }: {
   doc: Y.Doc;
   cell: CellView;
   index: number;
   count: number;
+  readOnly: boolean;
   runs: ReturnType<typeof useRuns>["runs"];
   loadFailures: ReturnType<typeof useRuns>["loadFailures"];
   cellStates: ReturnType<typeof useRuns>["cellStates"];
@@ -246,7 +268,12 @@ function Cell({
       count={count}
       onMove={(direction) => moveCell(doc, cell.id, direction)}
       onDelete={() => deleteCell(doc, cell.id)}
-      actions={cell.type === "sql" ? <RunButton state={state} onRun={() => void run()} /> : null}
+      readOnly={readOnly}
+      actions={
+        cell.type === "sql" && !readOnly ? (
+          <RunButton state={state} onRun={() => void run()} />
+        ) : null
+      }
     >
       {cell.type === "sql" && cell.source && (
         <SqlCellBody
@@ -257,9 +284,12 @@ function Cell({
           loadFailures={loadFailures}
           ensureRun={ensureRun}
           onRun={() => void run()}
+          readOnly={readOnly}
         />
       )}
-      {cell.type === "markdown" && cell.source && <MarkdownCellBody source={cell.source} />}
+      {cell.type === "markdown" && cell.source && (
+        <MarkdownCellBody source={cell.source} readOnly={readOnly} />
+      )}
       {cell.type === "chart" && cell.chart && (
         <ChartCell
           doc={doc}
@@ -270,6 +300,7 @@ function Cell({
           runs={runs}
           loadFailures={loadFailures}
           ensureRun={ensureRun}
+          readOnly={readOnly}
         />
       )}
     </CellFrame>
@@ -286,6 +317,7 @@ function ChartCell({
   runs,
   loadFailures,
   ensureRun,
+  readOnly,
 }: {
   doc: Y.Doc;
   cell: CellView;
@@ -295,6 +327,7 @@ function ChartCell({
   runs: ReturnType<typeof useRuns>["runs"];
   loadFailures: ReturnType<typeof useRuns>["loadFailures"];
   ensureRun: (runId: string) => void;
+  readOnly: boolean;
 }) {
   const sourceCell = cells.find((c) => c.id === config.source && c.type === "sql");
   const lastRunId = sourceCell?.lastRunId ?? null;
@@ -320,6 +353,7 @@ function ChartCell({
       config={config}
       sqlCells={sqlCells}
       source={source}
+      disabled={readOnly}
       onChange={(patch) => {
         const map = chartMap(doc, cell.id);
         if (map) writeChartConfig(map, patch);

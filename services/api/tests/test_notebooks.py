@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from notebook_api.config import Settings
 from notebook_api.db.models import CellRun, Notebook
 from notebook_api.main import create_app
-from notebook_api.notebooks.routes import RUNS_KEPT_PER_CELL
+from notebook_api.notebooks.executions import RUNS_KEPT_PER_CELL
 from notebook_api.query.runner import QueryFailedError
 from notebook_api.query.validate import MAX_SQL_CHARS
 from tests.fixtures import auth_settings, browser, sign_in
@@ -342,7 +342,8 @@ def _gate_slow_runs(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> _Gat
             gate.entered.set()
             # The test sets a threading.Event from its own thread; wait for it
             # off the event loop.
-            await asyncio.to_thread(gate.release.wait)
+            # (Bounded, so a broken test fails instead of hanging.)
+            await asyncio.to_thread(gate.release.wait, 30)
             return await real_run("select 'slow' as x")
         return await real_run(sql)
 
@@ -350,15 +351,25 @@ def _gate_slow_runs(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> _Gat
     return gate
 
 
+def _expire_locks(url: str) -> None:
+    engine = sa.create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(sa.text("UPDATE cell_executions SET expires_at = now() - interval '1 second'"))
+    engine.dispose()
+
+
 def test_a_slow_run_is_never_pruned_by_runs_that_finished_during_it(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, clean_db: str
 ) -> None:
+    # Runs of one cell normally can't overlap (the execution lock), but they
+    # can once a slow execution's lock has expired and been taken over.
     gate = _gate_slow_runs(client, monkeypatch)
     notebook_id = _create(client)["id"]
     url = f"/notebooks/{notebook_id}/cells/c1/runs"
     with ThreadPoolExecutor(max_workers=1) as pool:
         slow = pool.submit(lambda: client.post(url, json={"sql": "slow"}))
         assert gate.entered.wait(timeout=10)  # the slow request started first
+        _expire_locks(clean_db)
         fast = [_run(client, notebook_id, f"select {i} as x") for i in range(RUNS_KEPT_PER_CELL)]
         gate.release.set()
         slow_response = slow.result(timeout=30)

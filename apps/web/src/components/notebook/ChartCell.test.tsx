@@ -40,6 +40,20 @@ describe("ChartCellBody", () => {
     expect([...x.options].map((o) => o.value)).toEqual(["", "borough", "trips"]);
   });
 
+  it("shows a viewer the config with every control disabled", () => {
+    const props = {
+      config: { ...DEFAULT_CHART_CONFIG, source: "sql-1", x: "borough" },
+      sqlCells,
+      source: ready,
+      onChange: vi.fn(),
+    };
+    render(<ChartCellBody {...props} disabled />);
+    const controls = screen.getAllByRole<HTMLSelectElement>("combobox");
+    expect(controls).toHaveLength(6);
+    for (const control of controls) expect(control.disabled).toBe(true);
+    expect(screen.getByLabelText<HTMLSelectElement>("Chart x").value).toBe("borough");
+  });
+
   it("reports each change as a config patch", () => {
     const { onChange } = renderBody({ source: "sql-1" });
     fireEvent.change(screen.getByLabelText("Chart x"), { target: { value: "borough" } });

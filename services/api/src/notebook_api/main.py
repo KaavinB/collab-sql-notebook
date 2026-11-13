@@ -15,7 +15,9 @@ from notebook_api.body_limit import BodyLimitMiddleware
 from notebook_api.config import Settings
 from notebook_api.db.session import create_engine, make_sessionmaker
 from notebook_api.errors import install_error_handlers
+from notebook_api.notebooks.executions import Executions, lock_ttl_seconds
 from notebook_api.notebooks.routes import router as notebooks_router
+from notebook_api.notebooks.sharing import members_router, share_links_router
 from notebook_api.query.engine import EngineLimits
 from notebook_api.query.runner import QueryRunner
 
@@ -57,14 +59,22 @@ def create_app(
         engine = create_engine(settings.database_url) if settings.database_url else None
         app.state.sessions = make_sessionmaker(engine) if engine else None
         runner = build_query_runner(settings)
+        executions: Executions | None = None
         try:
             if runner is not None:
                 # Fails startup loudly if the database is missing or a worker
                 # can't open it, rather than failing on the first query.
                 await runner.start()
             app.state.query_runner = runner
+            if runner is not None and app.state.sessions is not None:
+                executions = Executions(app.state.sessions, runner, lock_ttl_seconds(settings))
+            app.state.executions = executions
             yield
         finally:
+            # Executions first: each releases its cell's lock in Postgres,
+            # which needs the database engine still open.
+            if executions is not None:
+                await executions.close()
             if runner is not None:
                 await runner.close()
             if engine is not None:
@@ -97,6 +107,8 @@ def create_app(
 
     app.include_router(auth_router)
     app.include_router(notebooks_router)
+    app.include_router(members_router)
+    app.include_router(share_links_router)
     install_error_handlers(app)  # last: it reads the finished route schema
     return app
 

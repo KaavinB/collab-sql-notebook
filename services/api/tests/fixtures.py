@@ -1,13 +1,19 @@
-"""Helpers that write tiny raw files shaped exactly like the real TLC downloads."""
+"""Test helpers: tiny raw files shaped like the TLC downloads, signed-in clients,
+and direct database access (including LISTEN for the API's notifications)."""
 
+import json
+import time
 from pathlib import Path
 from typing import Any
 
 import duckdb
+import psycopg
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from sqlalchemy.engine import make_url
 
+from notebook_api import events
 from notebook_api.config import Settings
 
 # The raw TLC column names and types, as they appear in the 2024 Parquet files.
@@ -110,3 +116,61 @@ def sign_in(client: TestClient, name: str = "Ada") -> dict[str, Any]:
     assert response.status_code == 200, response.text
     user: dict[str, Any] = response.json()
     return user
+
+
+# --- direct database access and NOTIFY ----------------------------------------
+
+
+def sql_connection(url: str) -> psycopg.Connection[Any]:
+    """A plain autocommit psycopg connection to the test database (the SQLAlchemy URL)."""
+    return psycopg.connect(
+        make_url(url).set(drivername="postgresql").render_as_string(hide_password=False),
+        autocommit=True,
+    )
+
+
+class Listener:
+    """LISTENs on the sync server's channel, as the sync server does.
+
+    Notifications reach a listener only once the sending transaction has
+    committed, so receiving one proves the change it describes is visible.
+    """
+
+    def __init__(self, url: str) -> None:
+        self.conn = sql_connection(url)
+        self.conn.execute(f"LISTEN {events.CHANNEL}")
+
+    def take(self, count: int, timeout: float = 10.0) -> list[str]:
+        """The next `count` payloads, in the order they were committed."""
+        payloads: list[str] = []
+        deadline = time.monotonic() + timeout
+        while len(payloads) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            for notify in self.conn.notifies(timeout=remaining, stop_after=count - len(payloads)):
+                assert notify.channel == events.CHANNEL
+                payloads.append(notify.payload)
+        return payloads
+
+    def take_events(self, count: int, timeout: float = 10.0) -> list[dict[str, Any]]:
+        return [json.loads(payload) for payload in self.take(count, timeout)]
+
+    def nothing_more(self, wait: float = 0.3) -> bool:
+        return self.take(1, timeout=wait) == []
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+def compact(event: dict[str, Any]) -> str:
+    """The exact payload text the API sends for `event` (key order included)."""
+    return json.dumps(event, separators=(",", ":"))
+
+
+def add_member(url: str, notebook_id: str, user_id: str, role: str) -> None:
+    with sql_connection(url) as conn:
+        conn.execute(
+            "INSERT INTO notebook_members (notebook_id, user_id, role) VALUES (%s, %s, %s)",
+            (notebook_id, user_id, role),
+        )

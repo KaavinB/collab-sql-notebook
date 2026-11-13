@@ -42,6 +42,8 @@ interface ChartCellProps {
   source: ChartSource;
   /** Applies a config change; throws if the value is invalid. */
   onChange: (patch: Partial<ChartConfig>) => void;
+  /** View only: the config is shown but every control is disabled. */
+  disabled?: boolean;
 }
 
 const select =
@@ -66,7 +68,13 @@ function useStableConfig(config: ChartConfig): ChartConfig {
   return useMemo(() => JSON.parse(key) as ChartConfig, [key]);
 }
 
-export function ChartCellBody({ config: rawConfig, sqlCells, source, onChange }: ChartCellProps) {
+export function ChartCellBody({
+  config: rawConfig,
+  sqlCells,
+  source,
+  onChange,
+  disabled = false,
+}: ChartCellProps) {
   const config = useStableConfig(rawConfig);
   const [changeError, setChangeError] = useState<string | null>(null);
   const result = source.kind === "ready" ? source.result : null;
@@ -99,6 +107,7 @@ export function ChartCellBody({ config: rawConfig, sqlCells, source, onChange }:
       <select
         aria-label={`Chart ${label}`}
         className={select}
+        disabled={disabled}
         value={value ?? ""}
         onChange={(e) => change({ [key]: e.target.value || null })}
       >
@@ -125,6 +134,7 @@ export function ChartCellBody({ config: rawConfig, sqlCells, source, onChange }:
           <select
             aria-label="Chart data"
             className={select}
+            disabled={disabled}
             value={config.source ?? ""}
             onChange={(e) => change({ source: e.target.value || null })}
           >
@@ -141,6 +151,7 @@ export function ChartCellBody({ config: rawConfig, sqlCells, source, onChange }:
           <select
             aria-label="Chart mark"
             className={select}
+            disabled={disabled}
             value={config.mark}
             onChange={(e) => change({ mark: e.target.value as ChartConfig["mark"] })}
           >
@@ -156,6 +167,7 @@ export function ChartCellBody({ config: rawConfig, sqlCells, source, onChange }:
           <select
             aria-label="Chart aggregate"
             className={select}
+            disabled={disabled}
             value={config.aggregate}
             onChange={(e) => change({ aggregate: e.target.value as ChartConfig["aggregate"] })}
           >

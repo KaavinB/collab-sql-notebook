@@ -23,6 +23,19 @@ interface CodeEditorProps {
   placeholderText?: string;
   /** Runs on Mod-Enter (Cmd on macOS, Ctrl elsewhere). */
   onSubmit?: () => void;
+  /** View only: the text can be read, selected and copied, never changed. */
+  readOnly?: boolean;
+}
+
+/**
+ * The extensions that make an editor view-only. `EditorState.readOnly`
+ * refuses every change from user input (typing, paste, drop, commands);
+ * `EditorView.editable(false)` also removes contenteditable, so the browser
+ * shows no caret and screen readers announce the text as read-only.
+ * Remote changes from collaborators still arrive through yCollab.
+ */
+export function readOnlyExtensions(): Extension[] {
+  return [EditorState.readOnly.of(true), EditorView.editable.of(false)];
 }
 
 /**
@@ -33,7 +46,13 @@ interface CodeEditorProps {
  * Undo/redo comes from Yjs's UndoManager, not CodeMirror's history: it only
  * undoes this user's own edits, never someone else's.
  */
-export function CodeEditor({ text, language, placeholderText, onSubmit }: CodeEditorProps) {
+export function CodeEditor({
+  text,
+  language,
+  placeholderText,
+  onSubmit,
+  readOnly = false,
+}: CodeEditorProps) {
   const parent = useRef<HTMLDivElement>(null);
   // The latest onSubmit, without rebuilding the editor when it changes.
   const submit = useRef(onSubmit);
@@ -59,14 +78,18 @@ export function CodeEditor({ text, language, placeholderText, onSubmit }: CodeEd
             return true;
           },
         },
-        ...yUndoManagerKeymap,
-        indentWithTab,
+        // Yjs undo writes to the Y.Text directly, past CodeMirror's
+        // read-only check, so a view-only editor doesn't bind it at all.
+        ...(readOnly ? [] : yUndoManagerKeymap),
+        // Tab moves focus out of a view-only editor instead of indenting.
+        ...(readOnly ? [] : [indentWithTab]),
         ...defaultKeymap,
       ]),
       language === "sql" ? sql() : markdown(),
       yCollab(text, null, { undoManager }),
     ];
-    if (placeholderText) extensions.push(placeholder(placeholderText));
+    if (placeholderText && !readOnly) extensions.push(placeholder(placeholderText));
+    if (readOnly) extensions.push(...readOnlyExtensions());
     const view = new EditorView({
       state: EditorState.create({ doc: text.toString(), extensions }),
       parent: parent.current,
@@ -75,7 +98,7 @@ export function CodeEditor({ text, language, placeholderText, onSubmit }: CodeEd
       view.destroy();
       undoManager.destroy();
     };
-  }, [text, language, placeholderText]);
+  }, [text, language, placeholderText, readOnly]);
 
   return (
     <div
