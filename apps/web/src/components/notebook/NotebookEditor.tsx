@@ -272,8 +272,11 @@ function SyncBanner({ state, unsynced }: { state: SyncState; unsynced: boolean }
       ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
       : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200";
   return (
+    // Only a stop is announced from here (as an alert). Offline and unsynced
+    // are announced once, by the status pill; announcing this sentence too
+    // would read the same change twice.
     <p
-      role={tone === "error" ? "alert" : "status"}
+      role={tone === "error" ? "alert" : undefined}
       className={`rounded-lg border px-3 py-2 text-sm ${colors}`}
       data-testid="sync-banner"
     >
