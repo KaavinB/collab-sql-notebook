@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { field, primaryButton, secondaryButton } from "@/components/ui";
 import { ApiError, type ApiClient, type Providers, type User } from "@/lib/api";
 
 const PROVIDER_LABELS: Record<string, string> = { github: "GitHub", google: "Google" };
@@ -51,7 +52,22 @@ export function SignIn({
 
   const none = providers && providers.providers.length === 0 && !providers.dev_login;
   return (
-    <div className="mx-auto max-w-sm space-y-4 py-12">
+    <div className="mx-auto max-w-md space-y-5 py-12">
+      <div className="space-y-3">
+        <p className="flex items-center gap-2 font-semibold">
+          <span
+            aria-hidden="true"
+            className="flex h-6 w-6 items-center justify-center rounded-md bg-amber-400 text-xs font-bold text-zinc-900"
+          >
+            T
+          </span>
+          Taxi Notebook
+        </p>
+        <p className="text-lg text-zinc-600 dark:text-zinc-400">
+          Ask questions about New York taxi trips in plain English, see the answers as tables and
+          charts, and explore them together with others.
+        </p>
+      </div>
       <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
       {error && (
         <p role="alert" className="text-sm text-red-600">
@@ -68,7 +84,7 @@ export function SignIn({
         <a
           key={provider}
           href={api.signInUrl(provider, next)}
-          className="block rounded-md border border-zinc-300 px-3 py-2 text-center text-sm hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
+          className={`${secondaryButton} w-full py-2`}
         >
           Continue with {PROVIDER_LABELS[provider] ?? provider}
         </a>
@@ -78,22 +94,22 @@ export function SignIn({
           onSubmit={devLogin}
           className="space-y-2 border-t border-zinc-200 pt-4 dark:border-zinc-800"
         >
-          <p className="text-xs text-zinc-500">Development sign-in (no password; local only).</p>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            Type the name others will see next to your edits. (Local development sign-in: no
+            password.)
+          </p>
           <div className="flex gap-2">
             <input
               aria-label="Dev user name"
-              placeholder="Name"
+              placeholder="Your name"
               value={name}
               maxLength={60}
               onChange={(e) => setName(e.target.value)}
-              className="flex-1 rounded-md border border-zinc-300 bg-transparent px-3 py-1.5 text-sm dark:border-zinc-700"
+              className={`${field} flex-1`}
+              autoFocus
             />
-            <button
-              type="submit"
-              disabled={!name.trim() || busy}
-              className="rounded-md bg-zinc-900 px-3 py-1.5 text-sm text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
-            >
-              Sign in
+            <button type="submit" disabled={!name.trim() || busy} className={primaryButton}>
+              {busy ? "Signing in…" : "Sign in"}
             </button>
           </div>
         </form>

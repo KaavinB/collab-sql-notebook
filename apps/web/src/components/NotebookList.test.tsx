@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NotebookList } from "@/components/NotebookList";
 import { ApiError, type ApiClient, type Notebook } from "@/lib/api";
+import { takeExampleMark } from "@/lib/notebook/example";
 import { deferred, fakeApi, NOTEBOOK } from "@/test/fakeApi";
 
 const push = vi.fn();
@@ -37,6 +38,30 @@ describe("NotebookList", () => {
     await act(async () => created.resolve(NOTEBOOK));
     expect(createNotebook).toHaveBeenCalledTimes(1);
     expect(push).toHaveBeenCalledWith(`/notebooks/${NOTEBOOK.id}`);
+  });
+
+  it("starts the guided example: creates it and marks it to be filled in", async () => {
+    api = fakeApi();
+    render(<NotebookList />);
+    fireEvent.click(screen.getByRole("button", { name: "Start with an example" }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith(`/notebooks/${NOTEBOOK.id}`));
+    expect(api.createNotebook).toHaveBeenCalledWith("Example: NYC taxi trips");
+    expect(takeExampleMark(NOTEBOOK.id)).toBe(true);
+  });
+
+  it("creates a blank notebook without asking for a name first", async () => {
+    api = fakeApi();
+    render(<NotebookList />);
+    fireEvent.click(screen.getByRole("button", { name: "New blank notebook" }));
+    await waitFor(() => expect(push).toHaveBeenCalled());
+    expect(api.createNotebook).toHaveBeenCalledWith("Untitled notebook");
+    expect(takeExampleMark(NOTEBOOK.id)).toBe(false);
+  });
+
+  it("says when you have no notebooks yet, and how to start", async () => {
+    api = fakeApi({ listNotebooks: async () => [] });
+    render(<NotebookList />);
+    expect((await screen.findByText(/No notebooks yet/)).textContent).toMatch(/example/);
   });
 
   it("lets you try again after a failed create", async () => {
@@ -92,8 +117,8 @@ describe("NotebookList", () => {
     render(<NotebookList />);
     await screen.findByRole("link", { name: "Team notes" });
     expect(screen.getAllByTestId("notebook-role").map((el) => el.textContent)).toEqual([
-      "editor",
-      "viewer",
+      "Can edit",
+      "Can view",
     ]);
     expect(screen.getByRole("button", { name: `Delete ${NOTEBOOK.title}` })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Delete Team notes" })).toBeNull();

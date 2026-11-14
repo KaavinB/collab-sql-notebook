@@ -20,7 +20,7 @@ const components: Components = {
 
 export function MarkdownPreview({ source }: { source: string }) {
   if (!source.trim()) {
-    return <p className="text-sm text-zinc-400 italic">Empty markdown cell</p>;
+    return <p className="text-sm text-zinc-500 italic">Empty text cell</p>;
   }
   return (
     <div className="prose-sm max-w-none space-y-2 text-sm [&_a]:underline [&_code]:font-mono [&_h1]:text-xl [&_h1]:font-semibold [&_h2]:text-lg [&_h2]:font-semibold [&_li]:ml-5 [&_ol]:list-decimal [&_ul]:list-disc">

@@ -1,7 +1,16 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+import { Dialog } from "@/components/Dialog";
+import {
+  dangerButton,
+  primaryButton,
+  secondaryButton,
+  smallButton,
+  smallField,
+} from "@/components/ui";
 
 import {
   ApiError,
@@ -14,10 +23,20 @@ import {
   type User,
 } from "@/lib/api";
 
-const button =
-  "rounded border border-zinc-300 px-2 py-0.5 text-xs hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-800";
-const select =
-  "rounded border border-zinc-300 bg-transparent px-1 py-0.5 text-xs dark:border-zinc-700";
+const button = smallButton;
+const select = smallField;
+
+/** Roles in words: what the person can do. */
+export const ROLE_LABELS: Record<Member["role"], string> = {
+  owner: "Owner",
+  editor: "Can edit",
+  viewer: "Can view",
+};
+const LINK_ROLE_LABELS: Record<SharedRole, string> = {
+  editor: "edit",
+  viewer: "view",
+};
+const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
 
 const message = (error: unknown, fallback: string) =>
   error instanceof ApiError ? error.message : fallback;
@@ -28,34 +47,54 @@ export function shareUrl(token: string): string {
 }
 
 /**
- * Who has access to the notebook. The owner also creates and revokes share
- * links and changes or removes members; everyone else can see the members
- * and leave. Closed by default, so opening a notebook doesn't load any of it.
+ * Who has access to the notebook, in a dialog opened from the notebook's
+ * header. The owner also creates and revokes share links and changes or
+ * removes members; everyone else can see the members and leave. Nothing is
+ * loaded until the dialog opens.
  */
 export function SharePanel({ api, notebook }: { api: ApiClient; notebook: Notebook }) {
   const [open, setOpen] = useState(false);
-  const panelId = useId();
   const isOwner = notebook.role === "owner";
   return (
-    <div className="space-y-2">
+    <>
       <button
-        className={button}
+        className={isOwner ? primaryButton : secondaryButton}
         aria-expanded={open}
-        aria-controls={panelId}
+        aria-haspopup="dialog"
         onClick={() => setOpen((value) => !value)}
+        title={isOwner ? "Invite people with a link" : "See who has access"}
       >
+        {isOwner && <ShareIcon />}
         {isOwner ? "Share" : "Members"}
       </button>
       {open && (
-        <section
-          id={panelId}
-          aria-label="Sharing"
-          className="space-y-4 rounded-lg border border-zinc-200 p-3 text-sm dark:border-zinc-800"
+        <Dialog
+          title={isOwner ? `Share “${notebook.title}”` : "People with access"}
+          description={
+            isOwner
+              ? "Invite people with a link. They sign in, then see the notebook live, with you."
+              : undefined
+          }
+          onClose={() => setOpen(false)}
         >
-          <SharingDetails api={api} notebook={notebook} />
-        </section>
+          <section aria-label="Sharing" className="space-y-6 text-sm">
+            <SharingDetails api={api} notebook={notebook} />
+          </section>
+        </Dialog>
       )}
-    </div>
+    </>
+  );
+}
+
+function ShareIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 16 16"
+      className="h-4 w-4 fill-none stroke-current stroke-[1.5]"
+    >
+      <path d="M8 10V2M5 5l3-3 3 3M3 9v4h10V9" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
@@ -163,10 +202,16 @@ function ShareLinks({
     }
   };
 
+  // The button says "Copied" for a moment, then goes back to "Copy link",
+  // so copying again gives fresh feedback.
+  const resetCopied = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(resetCopied.current), []);
   const copy = async (url: string) => {
     try {
       await navigator.clipboard.writeText(url);
       setCopied("yes");
+      clearTimeout(resetCopied.current);
+      resetCopied.current = setTimeout(() => setCopied(null), 2500);
     } catch {
       setCopied("failed");
     }
@@ -183,14 +228,11 @@ function ShareLinks({
   };
 
   return (
-    <div className="space-y-2">
-      <h2 className="font-medium">Share links</h2>
-      <p className="text-xs text-zinc-500">
-        Anyone who opens a link and signs in joins with its role. Revoke a link to stop it working.
-      </p>
-      <div className="flex items-center gap-2">
-        <label className="flex items-center gap-1 text-xs">
-          Role
+    <div className="space-y-3">
+      <h3 className="font-semibold">Invite with a link</h3>
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-2">
+          Anyone with the link can
           <select
             aria-label="Role for the new link"
             className={select}
@@ -199,19 +241,26 @@ function ShareLinks({
           >
             {SHARED_ROLES.map((r) => (
               <option key={r} value={r}>
-                {r}
+                {LINK_ROLE_LABELS[r]}
               </option>
             ))}
           </select>
         </label>
-        <button className={button} onClick={() => void create()} disabled={creating}>
+        <button className={primaryButton} onClick={() => void create()} disabled={creating}>
           Create link
         </button>
       </div>
+      <p className="text-xs text-zinc-500">
+        {role === "editor"
+          ? "Editors can change cells, run queries and ask the AI."
+          : "Viewers see everything live but can't change anything or run queries."}{" "}
+        People sign in before they join.
+      </p>
       {created && (
-        <div className="space-y-1 rounded-md bg-zinc-50 p-2 dark:bg-zinc-900">
-          <p className="text-xs">
-            New {created.role} link. Copy it now: it won&apos;t be shown again.
+        <div className="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-900 dark:bg-emerald-950/30">
+          <p>
+            Link ready: anyone with it can <strong>{LINK_ROLE_LABELS[created.role]}</strong>. Copy
+            it now: it won&apos;t be shown again.
           </p>
           <div className="flex gap-2">
             <input
@@ -219,15 +268,15 @@ function ShareLinks({
               readOnly
               value={created.url}
               onFocus={(e) => e.currentTarget.select()}
-              className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-0.5 font-mono text-xs dark:border-zinc-700"
+              className={`${select} flex-1 font-mono`}
             />
-            <button className={button} onClick={() => void copy(created.url)}>
-              Copy
+            <button className={primaryButton} onClick={() => void copy(created.url)}>
+              {copied === "yes" ? "Copied" : "Copy link"}
             </button>
           </div>
           {copied === "yes" && (
-            <p role="status" className="text-xs text-emerald-700">
-              Copied.
+            <p role="status" className="text-xs text-emerald-700 dark:text-emerald-400">
+              Link copied. Paste it in a message to invite someone.
             </p>
           )}
           {copied === "failed" && (
@@ -237,27 +286,34 @@ function ShareLinks({
           )}
         </div>
       )}
-      {links.length === 0 ? (
-        <p className="text-xs text-zinc-500">No active links.</p>
-      ) : (
-        <ul className="space-y-1" aria-label="Active share links">
-          {links.map((link) => {
-            const label = `${link.role} link created ${new Date(link.created_at).toLocaleString()}`;
-            return (
-              <li key={link.id} className="flex items-center gap-2 text-xs">
-                <span className="flex-1">{label}</span>
-                <button
-                  className={button}
-                  onClick={() => void revoke(link)}
-                  aria-label={`Revoke ${label}`}
-                >
-                  Revoke
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      <div className="space-y-1">
+        <h4 className="text-xs font-medium uppercase tracking-wide text-zinc-500">Active links</h4>
+        {links.length === 0 ? (
+          <p className="text-xs text-zinc-500">No active links.</p>
+        ) : (
+          <ul
+            className="divide-y divide-zinc-100 dark:divide-zinc-800"
+            aria-label="Active share links"
+          >
+            {links.map((link) => {
+              const label = `Anyone with this link can ${LINK_ROLE_LABELS[link.role]}, created ${dateFormat.format(new Date(link.created_at))}`;
+              return (
+                <li key={link.id} className="flex items-center gap-2 py-1.5 text-xs">
+                  <span className="flex-1">{label}</span>
+                  <button
+                    className={dangerButton}
+                    onClick={() => void revoke(link)}
+                    aria-label={`Revoke link: ${label}`}
+                    title="Stop this link working. People who already joined keep their access."
+                  >
+                    Revoke
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }
@@ -318,14 +374,14 @@ function Members({
 
   return (
     <div className="space-y-2">
-      <h2 className="font-medium">Members</h2>
-      <ul className="space-y-1" aria-label="Members">
+      <h3 className="font-semibold">People with access</h3>
+      <ul className="divide-y divide-zinc-100 dark:divide-zinc-800" aria-label="Members">
         {members.map((member) => {
           const you = member.user_id === me.id;
           const name = you ? `${member.name} (you)` : member.name;
           const manageable = isOwner && member.role !== "owner";
           return (
-            <li key={member.user_id} className="flex items-center gap-2 text-xs">
+            <li key={member.user_id} className="flex items-center gap-2 py-1.5">
               <span className="flex-1">{name}</span>
               {manageable ? (
                 <>
@@ -337,12 +393,12 @@ function Members({
                   >
                     {SHARED_ROLES.map((r) => (
                       <option key={r} value={r}>
-                        {r}
+                        {ROLE_LABELS[r]}
                       </option>
                     ))}
                   </select>
                   <button
-                    className={button}
+                    className={dangerButton}
                     onClick={() => void remove(member)}
                     aria-label={`Remove ${member.name}`}
                   >
@@ -350,8 +406,8 @@ function Members({
                   </button>
                 </>
               ) : (
-                <span className="text-zinc-500" data-testid="member-role">
-                  {member.role}
+                <span className="text-xs text-zinc-500" data-testid="member-role">
+                  {ROLE_LABELS[member.role]}
                 </span>
               )}
             </li>
@@ -368,10 +424,7 @@ function Members({
         (confirmingLeave ? (
           <div className="flex items-center gap-2 text-xs">
             <span>You&apos;ll lose access unless someone shares it with you again.</span>
-            <button
-              className={`${button} border-red-500 text-red-600`}
-              onClick={() => void leave()}
-            >
+            <button className={dangerButton} onClick={() => void leave()}>
               Confirm leave
             </button>
             <button className={button} onClick={() => setConfirmingLeave(false)}>

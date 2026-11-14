@@ -14,7 +14,7 @@ test("the AI's suggestion and presence reach everyone, and one person accepts it
 }) => {
   const { ada, grace, close } = await twoPeople(browser, "editor");
   try {
-    await ada.getByRole("button", { name: "+ SQL" }).click();
+    await ada.getByRole("button", { name: "+ Query" }).click();
     await expect(grace.locator(".cm-content")).toHaveCount(1);
 
     // "fake-slow" makes the fake take a moment, so the thinking state shows.
@@ -34,7 +34,7 @@ test("the AI's suggestion and presence reach everyone, and one person accepts it
     expect(await cellText(ada)).toBe(""); // nothing applied yet
 
     // Grace accepts: the SQL becomes her edit, and the card goes away for everyone.
-    await grace.getByRole("button", { name: "Accept" }).click();
+    await grace.getByRole("button", { name: "Accept", exact: true }).click();
     for (const page of [ada, grace]) {
       await expect.poll(() => cellText(page)).toBe(FAKE_SQL);
       await expect(page.getByRole("region", { name: "AI suggestion" })).toHaveCount(0);
@@ -55,7 +55,7 @@ test("Fix with AI suggests a corrected query for a failed run, and rejecting lea
 }) => {
   const { ada, grace, close } = await twoPeople(browser, "editor");
   try {
-    await ada.getByRole("button", { name: "+ SQL" }).click();
+    await ada.getByRole("button", { name: "+ Query" }).click();
     await ada.locator(".cm-content").first().click();
     await ada.keyboard.type("select no_such_column from trips");
     await ada.getByRole("button", { name: "Run" }).click();
@@ -79,12 +79,12 @@ test("Fix with AI suggests a corrected query for a failed run, and rejecting lea
 test("a viewer sees the AI's suggestion but can't ask it or decide", async ({ browser }) => {
   const { ada, grace, close } = await twoPeople(browser, "viewer");
   try {
-    await ada.getByRole("button", { name: "+ SQL" }).click();
+    await ada.getByRole("button", { name: "+ Query" }).click();
     await ada.getByLabel("Ask AI").fill("how many trips are there?");
     await ada.getByRole("button", { name: "Ask AI" }).click();
     await expect(grace.getByTestId("ai-sql")).toHaveText(FAKE_SQL);
     await expect(grace.getByLabel("Ask AI")).toHaveCount(0);
-    await expect(grace.getByRole("button", { name: "Accept" })).toHaveCount(0);
+    await expect(grace.getByRole("button", { name: "Accept", exact: true })).toHaveCount(0);
     await expect(grace.getByRole("button", { name: "Reject" })).toHaveCount(0);
   } finally {
     await close();

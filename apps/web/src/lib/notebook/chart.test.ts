@@ -76,9 +76,57 @@ describe("buildChartSpec", () => {
   it("builds a bar chart with typed encodings and column names as titles", () => {
     const s = spec({ x: "borough", y: "trips" });
     expect(s.mark.type).toBe("bar");
-    expect(s.encoding.x).toEqual({ field: "x", type: "nominal", title: "borough" });
+    // Categories keep the query's row order, with horizontal labels when few.
+    expect(s.encoding.x).toEqual({
+      field: "x",
+      type: "nominal",
+      title: "borough",
+      sort: null,
+      axis: { labelAngle: 0, labelLimit: 160 },
+    });
     expect(s.encoding.y).toEqual({ field: "y", type: "quantitative", title: "trips" });
     expect(s.data.values[0]).toEqual({ x: "Manhattan", y: 8556749 });
+  });
+
+  it("draws bars over whole numbers as categories, not on a continuous axis", () => {
+    const result = {
+      columns: [
+        { name: "payment_type", type: "INTEGER" },
+        { name: "trips", type: "BIGINT" },
+      ],
+      rows: [
+        [1, 70],
+        [2, 13],
+      ],
+      row_count: 2,
+      truncated: false,
+      duration_ms: 1,
+    };
+    const config = { ...DEFAULT_CHART_CONFIG, source: "s", x: "payment_type", y: "trips" };
+    const bar = buildChartSpec(config, result);
+    expect(bar.ok && bar.spec.encoding).toMatchObject({ x: { type: "ordinal", sort: null } });
+    // A line over the same column stays continuous.
+    const line = buildChartSpec({ ...config, mark: "line" }, result);
+    expect(line.ok && line.spec.encoding).toMatchObject({ x: { type: "quantitative" } });
+  });
+
+  it("leaves labels to Vega's own layout when there are many categories", () => {
+    const rows = Array.from({ length: 20 }, (_, i) => [`zone ${i}`, i]);
+    const result = {
+      columns: [
+        { name: "zone", type: "VARCHAR" },
+        { name: "trips", type: "BIGINT" },
+      ],
+      rows,
+      row_count: rows.length,
+      truncated: false,
+      duration_ms: 1,
+    };
+    const plan = buildChartSpec(
+      { ...DEFAULT_CHART_CONFIG, source: "s", x: "zone", y: "trips" },
+      result,
+    );
+    expect(plan.ok && (plan.spec.encoding as { x: object }).x).not.toHaveProperty("axis");
   });
 
   it("turns DECIMAL and big-integer strings into numbers, and keeps nulls", () => {
@@ -125,8 +173,8 @@ describe("buildChartSpec", () => {
   });
 
   it.each([
-    [{ source: null }, result, /Choose a SQL cell/],
-    [{}, null, /Run the SQL cell first/],
+    [{ source: null }, result, /Choose a query/],
+    [{}, null, /Run the query first/],
     [{}, result, /x axis/],
     [{ x: "borough" }, result, /y axis/],
     [{ x: "borough", y: "nope" }, result, /no column "nope" for y/],

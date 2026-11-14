@@ -7,7 +7,7 @@ test("two editors type in the same cell at once and end up with the same text", 
 }) => {
   const { ada, grace, close } = await twoPeople(browser, "editor");
   try {
-    await ada.getByRole("button", { name: "+ SQL" }).click();
+    await ada.getByRole("button", { name: "+ Query" }).click();
     await expect(grace.locator(".cm-content")).toHaveCount(1); // the new cell arrived
 
     // Both type into the one cell at the same time.
@@ -39,7 +39,7 @@ test("two editors type in the same cell at once and end up with the same text", 
 test("a run anyone starts is shown to everyone, and survives a reload", async ({ browser }) => {
   const { ada, grace, close } = await twoPeople(browser, "editor");
   try {
-    await ada.getByRole("button", { name: "+ SQL" }).click();
+    await ada.getByRole("button", { name: "+ Query" }).click();
     await ada.locator(".cm-content").first().click();
     await ada.keyboard.type("select count(*) as trips from trips");
     await expect.poll(() => cellText(grace)).toBe("select count(*) as trips from trips");
@@ -68,7 +68,7 @@ test("a run one person starts shows as running for everyone, then its outcome", 
 }) => {
   const { ada, grace, close } = await twoPeople(browser, "editor");
   try {
-    await ada.getByRole("button", { name: "+ SQL" }).click();
+    await ada.getByRole("button", { name: "+ Query" }).click();
     await ada.locator(".cm-content").first().click();
     // Long enough to watch: a cross join that runs until the query timeout.
     await ada.keyboard.type("select sum(a.passenger_count) from trips a, trips b");
@@ -90,7 +90,7 @@ test("a viewer sees edits live but can't change anything", async ({ browser }) =
   const { ada, grace, close } = await twoPeople(browser, "viewer");
   try {
     await expect(grace.getByTestId("view-only")).toBeVisible();
-    await ada.getByRole("button", { name: "+ SQL" }).click();
+    await ada.getByRole("button", { name: "+ Query" }).click();
     await ada.locator(".cm-content").first().click();
     await ada.keyboard.type("select 42");
     await expect.poll(() => cellText(grace)).toBe("select 42");
@@ -98,7 +98,7 @@ test("a viewer sees edits live but can't change anything", async ({ browser }) =
     // The viewer's editor isn't editable, and there's nothing to press.
     await expect(grace.locator(".cm-content").first()).toHaveAttribute("contenteditable", "false");
     await expect(grace.getByRole("button", { name: "Run" })).toHaveCount(0);
-    await expect(grace.getByRole("button", { name: "+ SQL" })).toHaveCount(0);
+    await expect(grace.getByRole("button", { name: "+ Query" })).toHaveCount(0);
   } finally {
     await close();
   }
@@ -120,7 +120,7 @@ test("removing a member closes their live connection", async ({ browser }) => {
     await expect(grace.getByTestId("sync-status")).toHaveText(
       "You no longer have access to this notebook.",
     );
-    await expect(grace.getByRole("button", { name: "+ SQL" })).toHaveCount(0);
+    await expect(grace.getByRole("button", { name: "+ Query" })).toHaveCount(0);
   } finally {
     await close();
   }

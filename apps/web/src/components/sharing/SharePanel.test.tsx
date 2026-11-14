@@ -49,6 +49,26 @@ describe("SharePanel for the owner", () => {
     expect(api.listShareLinks).not.toHaveBeenCalled();
   });
 
+  it("opens as a dialog that Escape and the close button close", async () => {
+    open(fakeApi());
+    expect(screen.getByRole("dialog", { name: `Share “${NOTEBOOK.title}”` })).toBeTruthy();
+    await screen.findByRole("button", { name: "Create link" });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Share" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("says in words what each kind of link allows", async () => {
+    open(fakeApi());
+    const role = await screen.findByLabelText<HTMLSelectElement>("Role for the new link");
+    expect([...role.options].map((o) => o.textContent)).toEqual(["edit", "view"]);
+    expect(screen.getByText(/Viewers see everything live/)).toBeTruthy();
+    fireEvent.change(role, { target: { value: "editor" } });
+    expect(screen.getByText(/Editors can change cells/)).toBeTruthy();
+  });
+
   it("creates a link and shows its full URL once, with a Copy button", async () => {
     const api = fakeApi({ listMembers: async () => [OWNER] });
     open(api);
@@ -64,12 +84,13 @@ describe("SharePanel for the owner", () => {
     expect(api.createShareLink).toHaveBeenCalledWith(NOTEBOOK.id, "editor");
     expect(screen.getByText(/won.t be shown again/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
-    expect((await screen.findByRole("status")).textContent).toBe("Copied.");
+    fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
+    expect((await screen.findByRole("status")).textContent).toMatch(/^Link copied/);
+    expect(screen.getByRole("button", { name: "Copied" })).toBeTruthy();
     expect(writeText).toHaveBeenCalledWith(url);
     // The new link is listed (without its token) for revoking later.
     const listed = screen.getByRole("list", { name: "Active share links" });
-    expect(within(listed).getByText(/^editor link created/)).toBeTruthy();
+    expect(within(listed).getByText(/^Anyone with this link can edit, created/)).toBeTruthy();
     expect(listed.textContent).not.toContain(SHARE_TOKEN);
   });
 
@@ -77,14 +98,16 @@ describe("SharePanel for the owner", () => {
     writeText.mockRejectedValue(new Error("denied"));
     open(fakeApi());
     fireEvent.click(await screen.findByRole("button", { name: "Create link" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Copy" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Copy link" }));
     expect((await screen.findByRole("status")).textContent).toMatch(/Couldn.t copy/);
   });
 
   it("lists and revokes links", async () => {
     const api = fakeApi({ listShareLinks: async () => [LINK] });
     open(api);
-    const revoke = await screen.findByRole("button", { name: /^Revoke viewer link created/ });
+    const revoke = await screen.findByRole("button", {
+      name: /^Revoke link: Anyone with this link can view/,
+    });
     fireEvent.click(revoke);
     await waitFor(() => expect(screen.getByText("No active links.")).toBeTruthy());
     expect(api.revokeShareLink).toHaveBeenCalledWith(NOTEBOOK.id, LINK.id);
@@ -134,9 +157,9 @@ describe("SharePanel for other members", () => {
     open(api, shared);
     await screen.findByText(`${USER.name} (you)`);
     expect(screen.getAllByTestId("member-role").map((el) => el.textContent)).toEqual([
-      "owner",
-      "editor",
-      "viewer",
+      "Owner",
+      "Can edit",
+      "Can view",
     ]);
     expect(screen.queryByRole("combobox")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create link" })).toBeNull();

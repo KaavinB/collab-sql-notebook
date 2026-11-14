@@ -99,6 +99,8 @@ export type FieldType = "quantitative" | "temporal" | "nominal";
 
 const NUMERIC_TYPE =
   /^(TINYINT|SMALLINT|INTEGER|BIGINT|HUGEINT|UTINYINT|USMALLINT|UINTEGER|UBIGINT|UHUGEINT|FLOAT|DOUBLE|REAL|DECIMAL(\(\d+, ?\d+\))?)$/;
+const INTEGER_TYPE =
+  /^(TINYINT|SMALLINT|INTEGER|BIGINT|HUGEINT|UTINYINT|USMALLINT|UINTEGER|UBIGINT|UHUGEINT)$/i;
 const TEMPORAL_TYPE = /^(DATE|TIMESTAMP(_S|_MS|_NS)?|TIMESTAMP WITH TIME ZONE)$/;
 
 /**
@@ -158,8 +160,8 @@ const NUMERIC_AGGREGATES: ChartAggregate[] = ["sum", "mean", "min", "max"];
  * explains what's missing.
  */
 export function buildChartSpec(config: ChartConfig, result: QueryResult | null): ChartPlan {
-  if (!config.source) return { ok: false, reason: "Choose a SQL cell to chart." };
-  if (!result) return { ok: false, reason: "Run the SQL cell first; the chart uses its result." };
+  if (!config.source) return { ok: false, reason: "Choose a query to chart." };
+  if (!result) return { ok: false, reason: "Run the query first; the chart uses its result." };
   if (!config.x) return { ok: false, reason: "Choose a column for the x axis." };
   const countOnly = config.aggregate === "count";
   if (!config.y && !countOnly) return { ok: false, reason: "Choose a column for the y axis." };
@@ -243,13 +245,31 @@ export function buildChartSpec(config: ChartConfig, result: QueryResult | null):
     ...(color ? [{ ...field("color", color), ...labelled(color) }] : []),
   ];
 
+  // Bars over whole numbers (payment type 1-6, hour 0-23) are categories:
+  // on a continuous axis they'd be hairline bars at 1.0, 2.0... with ticks
+  // like 0.2 in between. An ordinal axis gives one evenly spaced bar per value.
+  const categorical =
+    x!.type === "nominal" ||
+    (config.mark === "bar" && x!.type === "quantitative" && INTEGER_TYPE.test(x!.duckdbType));
+  // Categories keep the query's row order (its ORDER BY) instead of being
+  // re-sorted alphabetically, and a handful of labels read horizontally.
+  const fewCategories = new Set(values.map((v) => v.x)).size <= 12;
+  const xEncoding = categorical
+    ? {
+        ...field("x", x!),
+        type: x!.type === "nominal" ? "nominal" : "ordinal",
+        sort: null,
+        ...(fewCategories ? { axis: { labelAngle: 0, labelLimit: 160 } } : {}),
+      }
+    : { ...field("x", x!), ...position(x!) };
+
   return {
     ok: true,
     spec: {
       data: { values },
       mark: { type: config.mark },
       encoding: {
-        x: { ...field("x", x!), ...position(x!) },
+        x: xEncoding,
         y: yEncoding,
         ...(color ? { color: { ...field("color", color), ...labelled(color) } } : {}),
         tooltip,

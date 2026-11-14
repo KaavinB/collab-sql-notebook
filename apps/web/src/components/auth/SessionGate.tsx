@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
@@ -118,8 +119,25 @@ export function SessionGate({
     );
   return (
     <SessionContext.Provider value={value}>
-      <div className="mb-4 flex items-center justify-end gap-3 text-sm text-zinc-500">
-        <span data-testid="signed-in-as">{value.user.name}</span>
+      <div className="mb-4 flex items-center gap-3 text-sm text-zinc-500">
+        <Link
+          href="/"
+          className="mr-auto flex items-center gap-2 rounded font-semibold text-zinc-900 focus-visible:outline-2 focus-visible:outline-violet-600 dark:text-zinc-100"
+        >
+          <span
+            aria-hidden="true"
+            className="flex h-6 w-6 items-center justify-center rounded-md bg-amber-400 text-xs font-bold text-zinc-900"
+          >
+            T
+          </span>
+          Taxi Notebook
+        </Link>
+        <span aria-hidden="true" className="text-zinc-500">
+          Signed in as
+        </span>
+        <span data-testid="signed-in-as" className="font-medium text-zinc-700 dark:text-zinc-300">
+          {value.user.name}
+        </span>
         {confirmingSignOut && (
           <span role="alert" className="text-amber-700">
             Some edits haven&apos;t reached the server yet. Signing out now loses them.{" "}

@@ -50,6 +50,6 @@ describe("MarkdownPreview", () => {
 
   it("shows a placeholder for an empty cell", () => {
     render(<MarkdownPreview source="   " />);
-    expect(screen.getByText("Empty markdown cell")).toBeTruthy();
+    expect(screen.getByText("Empty text cell")).toBeTruthy();
   });
 });

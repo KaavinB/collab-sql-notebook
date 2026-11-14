@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 
 import { Chart } from "@/components/notebook/Chart";
+import { smallField } from "@/components/ui";
 import type { QueryResult } from "@/lib/api";
 import {
   buildChartSpec,
@@ -28,12 +29,12 @@ export type ChartSource =
   | { kind: "ready"; result: QueryResult };
 
 const SOURCE_MESSAGES: Record<Exclude<ChartSource["kind"], "ready" | "failed">, string> = {
-  unset: "Choose a SQL cell to chart.",
-  deleted: "The SQL cell this chart used was deleted. Choose another one.",
-  "not-run": "Run the SQL cell first; the chart uses its result.",
-  loading: "Loading the SQL cell's result…",
-  unavailable: "The SQL cell's last result is no longer stored. Run it again.",
-  "load-error": "Couldn't load the SQL cell's result. Reload the page to try again.",
+  unset: "Choose a query to chart.",
+  deleted: "The query this chart used was deleted. Choose another one.",
+  "not-run": "Run the query first; the chart uses its result.",
+  loading: "Loading the query's result…",
+  unavailable: "The query's last result is no longer stored. Run it again.",
+  "load-error": "Couldn't load the query's result. Reload the page to try again.",
 };
 
 interface ChartCellProps {
@@ -46,15 +47,34 @@ interface ChartCellProps {
   disabled?: boolean;
 }
 
-const select =
-  "rounded border border-zinc-300 bg-transparent px-1 py-0.5 text-xs dark:border-zinc-700";
+const select = smallField;
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+const MARK_LABELS: Record<ChartConfig["mark"], string> = {
+  bar: "Bars",
+  line: "Line",
+  point: "Dots",
+  area: "Area",
+};
+
+const AGGREGATE_LABELS: Record<ChartConfig["aggregate"], string> = {
+  none: "Don't combine",
+  sum: "Add up (sum)",
+  mean: "Average",
+  count: "Count rows",
+  min: "Smallest",
+  max: "Largest",
+};
+
+/** A control with its visible label, which is also its accessible name. */
+function Field({ label, children }: { label: string; children: (id: string) => React.ReactNode }) {
+  const id = useId();
   return (
-    <label className="flex items-center gap-1 text-xs text-zinc-600 dark:text-zinc-400">
-      {label}
-      {children}
-    </label>
+    <div className="flex flex-col gap-1">
+      <label htmlFor={id} className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
+        {label}
+      </label>
+      {children(id)}
+    </div>
   );
 }
 
@@ -104,77 +124,89 @@ export function ChartCellBody({
     allowNone: boolean,
   ) => (
     <Field label={label}>
-      <select
-        aria-label={`Chart ${label}`}
-        className={select}
-        disabled={disabled}
-        value={value ?? ""}
-        onChange={(e) => change({ [key]: e.target.value || null })}
-      >
-        <option value="">{allowNone ? "none" : "choose…"}</option>
-        {withCurrent(value).map((name) => (
-          <option key={name} value={name}>
-            {name}
-          </option>
-        ))}
-      </select>
+      {(id) => (
+        <select
+          id={id}
+          className={select}
+          disabled={disabled}
+          value={value ?? ""}
+          onChange={(e) => change({ [key]: e.target.value || null })}
+        >
+          <option value="">{allowNone ? "Nothing" : "Choose a column…"}</option>
+          {withCurrent(value).map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+      )}
     </Field>
   );
 
   const sourceIsKnown = config.source === null || sqlCells.some((c) => c.id === config.source);
   let message: string | null = null;
-  if (source.kind === "failed") message = `The SQL cell's last run failed: ${source.message}`;
+  if (source.kind === "failed") message = `The query's last run failed: ${source.message}`;
   else if (source.kind !== "ready") message = SOURCE_MESSAGES[source.kind];
   else if (plan && !plan.ok) message = plan.reason;
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap gap-3">
-        <Field label="Data">
-          <select
-            aria-label="Chart data"
-            className={select}
-            disabled={disabled}
-            value={config.source ?? ""}
-            onChange={(e) => change({ source: e.target.value || null })}
-          >
-            <option value="">choose a SQL cell…</option>
-            {!sourceIsKnown && <option value={config.source!}>(deleted cell)</option>}
-            {sqlCells.map((cell) => (
-              <option key={cell.id} value={cell.id}>
-                {cell.label}
-              </option>
-            ))}
-          </select>
+      <div className="flex flex-wrap items-end gap-3">
+        <Field label="Data from">
+          {(id) => (
+            <select
+              id={id}
+              className={select}
+              disabled={disabled}
+              value={config.source ?? ""}
+              onChange={(e) => change({ source: e.target.value || null })}
+            >
+              <option value="">Choose a query…</option>
+              {!sourceIsKnown && <option value={config.source!}>(deleted cell)</option>}
+              {sqlCells.map((cell) => (
+                <option key={cell.id} value={cell.id}>
+                  {cell.label}
+                </option>
+              ))}
+            </select>
+          )}
         </Field>
-        <Field label="Mark">
-          <select
-            aria-label="Chart mark"
-            className={select}
-            disabled={disabled}
-            value={config.mark}
-            onChange={(e) => change({ mark: e.target.value as ChartConfig["mark"] })}
-          >
-            {CHART_MARKS.map((mark) => (
-              <option key={mark}>{mark}</option>
-            ))}
-          </select>
+        <Field label="Chart type">
+          {(id) => (
+            <select
+              id={id}
+              className={select}
+              disabled={disabled}
+              value={config.mark}
+              onChange={(e) => change({ mark: e.target.value as ChartConfig["mark"] })}
+            >
+              {CHART_MARKS.map((mark) => (
+                <option key={mark} value={mark}>
+                  {MARK_LABELS[mark]}
+                </option>
+              ))}
+            </select>
+          )}
         </Field>
-        {columnSelect("x", config.x, "x", false)}
-        {columnSelect("y", config.y, "y", config.aggregate === "count")}
-        {columnSelect("color", config.color, "color", true)}
-        <Field label="Aggregate">
-          <select
-            aria-label="Chart aggregate"
-            className={select}
-            disabled={disabled}
-            value={config.aggregate}
-            onChange={(e) => change({ aggregate: e.target.value as ChartConfig["aggregate"] })}
-          >
-            {CHART_AGGREGATES.map((aggregate) => (
-              <option key={aggregate}>{aggregate}</option>
-            ))}
-          </select>
+        {columnSelect("Across (x axis)", config.x, "x", false)}
+        {columnSelect("Up (y axis)", config.y, "y", config.aggregate === "count")}
+        {columnSelect("Color by", config.color, "color", true)}
+        <Field label="Combine rows">
+          {(id) => (
+            <select
+              id={id}
+              className={select}
+              disabled={disabled}
+              value={config.aggregate}
+              onChange={(e) => change({ aggregate: e.target.value as ChartConfig["aggregate"] })}
+            >
+              {CHART_AGGREGATES.map((aggregate) => (
+                <option key={aggregate} value={aggregate}>
+                  {AGGREGATE_LABELS[aggregate]}
+                </option>
+              ))}
+            </select>
+          )}
         </Field>
       </div>
       {changeError && (

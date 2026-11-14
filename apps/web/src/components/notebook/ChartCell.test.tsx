@@ -34,9 +34,9 @@ function renderBody(config: Partial<ChartConfig>, source: ChartSource = ready, o
 describe("ChartCellBody", () => {
   it("offers the SQL cells and the source result's columns", () => {
     renderBody({ source: "sql-1" });
-    const data = screen.getByLabelText<HTMLSelectElement>("Chart data");
+    const data = screen.getByLabelText<HTMLSelectElement>("Data from");
     expect([...data.options].map((o) => o.textContent)).toContain("SQL cell 1");
-    const x = screen.getByLabelText<HTMLSelectElement>("Chart x");
+    const x = screen.getByLabelText<HTMLSelectElement>("Across (x axis)");
     expect([...x.options].map((o) => o.value)).toEqual(["", "borough", "trips"]);
   });
 
@@ -51,14 +51,14 @@ describe("ChartCellBody", () => {
     const controls = screen.getAllByRole<HTMLSelectElement>("combobox");
     expect(controls).toHaveLength(6);
     for (const control of controls) expect(control.disabled).toBe(true);
-    expect(screen.getByLabelText<HTMLSelectElement>("Chart x").value).toBe("borough");
+    expect(screen.getByLabelText<HTMLSelectElement>("Across (x axis)").value).toBe("borough");
   });
 
   it("reports each change as a config patch", () => {
     const { onChange } = renderBody({ source: "sql-1" });
-    fireEvent.change(screen.getByLabelText("Chart x"), { target: { value: "borough" } });
-    fireEvent.change(screen.getByLabelText("Chart mark"), { target: { value: "line" } });
-    fireEvent.change(screen.getByLabelText("Chart color"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Across (x axis)"), { target: { value: "borough" } });
+    fireEvent.change(screen.getByLabelText("Chart type"), { target: { value: "line" } });
+    fireEvent.change(screen.getByLabelText("Color by"), { target: { value: "" } });
     expect(onChange.mock.calls).toEqual([
       [{ x: "borough" }],
       [{ mark: "line" }],
@@ -67,32 +67,28 @@ describe("ChartCellBody", () => {
   });
 
   it.each([
-    [{ kind: "unset" }, {}, "Choose a SQL cell to chart."],
+    [{ kind: "unset" }, {}, "Choose a query to chart."],
     [
       { kind: "deleted" },
       { source: "gone" },
-      "The SQL cell this chart used was deleted. Choose another one.",
+      "The query this chart used was deleted. Choose another one.",
     ],
-    [
-      { kind: "not-run" },
-      { source: "sql-1" },
-      "Run the SQL cell first; the chart uses its result.",
-    ],
-    [{ kind: "loading" }, { source: "sql-1" }, "Loading the SQL cell's result…"],
+    [{ kind: "not-run" }, { source: "sql-1" }, "Run the query first; the chart uses its result."],
+    [{ kind: "loading" }, { source: "sql-1" }, "Loading the query's result…"],
     [
       { kind: "unavailable" },
       { source: "sql-1" },
-      "The SQL cell's last result is no longer stored. Run it again.",
+      "The query's last result is no longer stored. Run it again.",
     ],
     [
       { kind: "load-error" },
       { source: "sql-1" },
-      "Couldn't load the SQL cell's result. Reload the page to try again.",
+      "Couldn't load the query's result. Reload the page to try again.",
     ],
     [
       { kind: "failed", message: "Binder Error: nope" },
       { source: "sql-1" },
-      "The SQL cell's last run failed: Binder Error: nope",
+      "The query's last run failed: Binder Error: nope",
     ],
   ] as [ChartSource, Partial<ChartConfig>, string][])(
     "explains the source state %j",
@@ -104,14 +100,14 @@ describe("ChartCellBody", () => {
 
   it("shows a deleted source as such instead of falling back to the placeholder", () => {
     renderBody({ source: "gone" }, { kind: "deleted" });
-    const data = screen.getByLabelText<HTMLSelectElement>("Chart data");
+    const data = screen.getByLabelText<HTMLSelectElement>("Data from");
     expect(data.value).toBe("gone");
     expect(data.selectedOptions[0].textContent).toBe("(deleted cell)");
   });
 
   it("keeps showing a configured column the latest result no longer has", () => {
     renderBody({ source: "sql-1", x: "old_column", y: "trips" });
-    expect(screen.getByLabelText<HTMLSelectElement>("Chart x").value).toBe("old_column");
+    expect(screen.getByLabelText<HTMLSelectElement>("Across (x axis)").value).toBe("old_column");
     expect(screen.getByTestId("chart-hint").textContent).toMatch(/no column "old_column"/);
   });
 
@@ -124,7 +120,7 @@ describe("ChartCellBody", () => {
       ],
     };
     renderBody({ source: "sql-1" }, { kind: "ready", result: dupes });
-    const x = screen.getByLabelText<HTMLSelectElement>("Chart x");
+    const x = screen.getByLabelText<HTMLSelectElement>("Across (x axis)");
     expect([...x.options].map((o) => o.value)).toEqual(["", "a"]);
   });
 
@@ -133,7 +129,7 @@ describe("ChartCellBody", () => {
       throw new Error("too long");
     });
     renderBody({ source: "sql-1" }, ready, onChange);
-    fireEvent.change(screen.getByLabelText("Chart x"), { target: { value: "borough" } });
+    fireEvent.change(screen.getByLabelText("Across (x axis)"), { target: { value: "borough" } });
     expect(screen.getByRole("alert").textContent).toMatch(/Give it a short alias/);
   });
 

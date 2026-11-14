@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
+  --background: #fafafa;
   --foreground: #171717;
 }
 
@@ -20,4 +20,13 @@
 body {
   background: var(--background);
   color: var(--foreground);
+}
+
+/* While a side panel (About the data) is open, wide screens move the page
+   over so the panel sits beside the notebook instead of covering it. The
+   panel is 28rem wide (max-w-md); see components/Dialog.tsx. */
+@media (min-width: 1024px) {
+  html[data-side-panel] body {
+    padding-right: 28rem;
+  }
 }

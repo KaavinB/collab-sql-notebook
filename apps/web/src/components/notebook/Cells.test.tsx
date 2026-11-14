@@ -85,7 +85,7 @@ describe("view-only cells", () => {
   it("shows an empty markdown cell as empty to a viewer, not as an editor", () => {
     const { view } = cell("markdown", "");
     render(<MarkdownCellBody source={view().source!} readOnly />);
-    expect(screen.getByText("Empty markdown cell.")).toBeTruthy();
+    expect(screen.getByText("Empty text cell.")).toBeTruthy();
     expect(screen.queryByTestId("editor")).toBeNull();
   });
 });

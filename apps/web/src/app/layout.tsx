@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Collab SQL Notebook",
-  description: "A collaborative SQL notebook with an AI collaborator",
+  title: "Taxi Notebook",
+  description: "Explore NYC taxi trips together: ask in plain English, get tables and charts",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

@@ -6,6 +6,7 @@ import * as Y from "yjs";
 import { AiAssist, type FailedRun } from "@/components/notebook/AiAssist";
 import { ApiError, type ApiClient, type Suggestion } from "@/lib/api";
 import { appendCell, cellsMap, orderedCells } from "@/lib/notebook/doc";
+import { queueQuestion, takeQuestion } from "@/lib/notebook/pendingQuestions";
 import { useCells } from "@/lib/notebook/useCells";
 import { deferred, fakeApi, NOTEBOOK, SUGGESTION_ID, suggestion } from "@/test/fakeApi";
 
@@ -188,6 +189,108 @@ describe("asking the AI", () => {
     setup({ readOnly: true, failedRun: { sql: "x", error: "y" } });
     expect(screen.queryByLabelText("Ask AI")).toBeNull();
     expect(screen.queryAllByRole("button")).toHaveLength(0);
+  });
+
+  it("sends a question queued for the cell when it was created, once", async () => {
+    queueQuestion(CELL, "busiest zones?");
+    const { api } = setup();
+    await waitFor(() => expect(api.askAi).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.askAi).mock.calls[0].slice(1, 3)).toEqual([
+      CELL,
+      { kind: "generate", prompt: "busiest zones?" },
+    ]);
+    cleanup();
+    const again = setup();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    expect(again.api.askAi).not.toHaveBeenCalled();
+  });
+
+  it("never sends a queued question for a viewer", async () => {
+    queueQuestion(CELL, "busiest zones?");
+    const { api } = setup({ readOnly: true });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    expect(api.askAi).not.toHaveBeenCalled();
+    takeQuestion(CELL);
+  });
+});
+
+describe("accept and run", () => {
+  function setupWithRun(options: { text?: string; ai?: unknown } = {}) {
+    const doc = new Y.Doc();
+    appendCell(doc, "sql", CELL);
+    orderedCells(doc)[0].source!.insert(0, options.text ?? "");
+    if (options.ai) cellsMap(doc).get(CELL)!.set("ai", options.ai);
+    const api = fakeApi();
+    const onRun = vi.fn(() => orderedCells(doc)[0].source!.toString());
+    function WithRun() {
+      const cell = useCells(doc).find((c) => c.id === CELL)!;
+      return (
+        <AiAssist
+          api={api}
+          notebookId={NOTEBOOK.id}
+          doc={doc}
+          cellId={CELL}
+          source={cell.source!}
+          ai={cell.ai}
+          failedRun={null}
+          readOnly={false}
+          onRun={onRun}
+        />
+      );
+    }
+    render(<WithRun />);
+    return { api, onRun };
+  }
+
+  it("is offered only when the cell can be run", () => {
+    setup({ ai: suggestionState() });
+    expect(screen.queryByRole("button", { name: "Accept and run" })).toBeNull();
+    cleanup();
+    setupWithRun({ ai: suggestionState() });
+    expect(button("Accept and run")).toBeTruthy();
+  });
+
+  it("leads with Accept and run for a checked query, and with Accept for an unchecked one", () => {
+    const order = () =>
+      screen
+        .getAllByRole("button")
+        .map((b) => b.textContent)
+        .filter((name) => name?.startsWith("Accept"));
+    setupWithRun({ ai: suggestionState() });
+    expect(order()).toEqual(["Accept and run", "Accept"]);
+    expect(button("Accept and run").className).toMatch(/bg-emerald/);
+    cleanup();
+    setupWithRun({ ai: suggestionState({ valid: false }) });
+    expect(order()).toEqual(["Accept", "Accept and run"]);
+    expect(button("Accept").className).toMatch(/bg-emerald/);
+    expect(button("Accept and run").className).not.toMatch(/bg-emerald/);
+  });
+
+  it("runs the cell after the accepted SQL is in it", async () => {
+    const { api, onRun } = setupWithRun({ ai: suggestionState() });
+    fireEvent.click(button("Accept and run"));
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
+    expect(api.decideSuggestion).toHaveBeenCalledWith(NOTEBOOK.id, SUGGESTION_ID, "accepted");
+    expect(onRun.mock.results[0].value).toBe("select count(*) from trips");
+  });
+
+  it("still asks before replacing SQL, then runs", async () => {
+    const { onRun } = setupWithRun({ text: "select 42", ai: suggestionState() });
+    fireEvent.click(button("Accept and run"));
+    expect(screen.getByRole("alert").textContent).toMatch(/already has SQL in it/);
+    expect(onRun).not.toHaveBeenCalled();
+    fireEvent.click(button("Replace anyway"));
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
+  });
+
+  it("doesn't run when the decision failed", async () => {
+    const { api, onRun } = setupWithRun({ ai: suggestionState() });
+    vi.mocked(api.decideSuggestion).mockRejectedValueOnce(
+      new ApiError(409, "conflict", "Already decided."),
+    );
+    fireEvent.click(button("Accept and run"));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/already accepted or rejected/);
+    expect(onRun).not.toHaveBeenCalled();
   });
 });
 

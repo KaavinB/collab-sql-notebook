@@ -25,7 +25,7 @@ test("sign in, create a notebook, run SQL, write markdown, and find it all after
     await page.getByLabel("Notebook title").press("Enter");
 
     // A SQL cell against the real taxi data.
-    await page.getByRole("button", { name: "+ SQL" }).click();
+    await page.getByRole("button", { name: "+ Query" }).click();
     await typeInLastEditor(page, "select count(*) as trips from trips where payment_type = 2");
     await page.getByRole("button", { name: "Run" }).click();
     const sqlCell = page.locator("section", { hasText: "sql" }).first();
@@ -33,39 +33,39 @@ test("sign in, create a notebook, run SQL, write markdown, and find it all after
     await expect(sqlCell.getByTestId("result-summary")).toContainText("1 row");
 
     // A rejected statement is stored and shown as an error.
-    await page.getByRole("button", { name: "+ SQL" }).click();
+    await page.getByRole("button", { name: "+ Query" }).click();
     await typeInLastEditor(page, "drop table trips");
     await page.keyboard.press("ControlOrMeta+Enter");
-    await expect(page.getByText("Not allowed: Only SELECT queries are allowed.")).toBeVisible();
+    await expect(page.getByText("This notebook can only read data, not change it.")).toBeVisible();
 
     // A markdown cell, rendered after editing.
-    await page.getByRole("button", { name: "+ Markdown" }).click();
+    await page.getByRole("button", { name: "+ Text" }).click();
     await typeInLastEditor(page, "# Payment types\n\nCash trips only.");
     await page.getByRole("button", { name: "Done" }).click();
     await expect(page.getByRole("heading", { name: "Payment types" })).toBeVisible();
 
     // Reorder: move the markdown cell to the top.
-    const markdownCell = page.locator("section[aria-label^='markdown cell']");
+    const markdownCell = page.locator("section[aria-label^='Text cell']");
     await markdownCell.getByRole("button", { name: "Move cell up" }).click();
     await markdownCell.getByRole("button", { name: "Move cell up" }).click();
-    await expect(page.locator("section").first()).toHaveAttribute("aria-label", /^markdown cell 1/);
+    await expect(page.locator("section").first()).toHaveAttribute("aria-label", /^Text cell 1/);
 
     await expect(page.getByTestId("sync-status")).toHaveText("Live");
 
     // Everything survives a reload: text, order, and the stored results.
     await page.reload();
-    await expect(page.locator("section").first()).toHaveAttribute("aria-label", /^markdown cell 1/);
+    await expect(page.locator("section").first()).toHaveAttribute("aria-label", /^Text cell 1/);
     await expect(page.getByRole("heading", { name: "Payment types" })).toBeVisible();
     await expect(
       page.getByText("select count(*) as trips from trips where payment_type = 2"),
     ).toBeVisible();
     await expect(page.getByTestId("result-summary").first()).toContainText("1 row");
-    await expect(page.getByText("Not allowed: Only SELECT queries are allowed.")).toBeVisible();
+    await expect(page.getByText("This notebook can only read data, not change it.")).toBeVisible();
 
     await expect(page.getByLabel("Notebook title")).toHaveValue(renamed);
 
     // Delete a cell (two clicks), and the deletion is saved too.
-    const lastSql = page.locator("section[aria-label^='sql cell 3']");
+    const lastSql = page.locator("section[aria-label^='Query cell 3']");
     await lastSql.getByRole("button", { name: "Delete cell" }).click();
     await lastSql.getByRole("button", { name: "Confirm delete cell" }).click();
     await expect(page.locator("section")).toHaveCount(2);
@@ -100,7 +100,7 @@ test("chart a SQL cell's result, and the chart survives a reload", async ({ page
   const notebookId = await api.createNotebook(page, `E2E chart ${Date.now()}`);
   try {
     await page.goto(`/notebooks/${notebookId}`);
-    await page.getByRole("button", { name: "+ SQL" }).click();
+    await page.getByRole("button", { name: "+ Query" }).click();
     await typeInLastEditor(
       page,
       "select payment_type, count(*) as trips from trips group by all order by payment_type",
@@ -111,16 +111,16 @@ test("chart a SQL cell's result, and the chart survives a reload", async ({ page
     const rows = Number((await summary.textContent())!.match(/^(\d+) rows/)![1]);
 
     await page.getByRole("button", { name: "+ Chart" }).click();
-    await expect(page.getByTestId("chart-hint")).toHaveText("Choose a SQL cell to chart.");
-    await page.getByLabel("Chart data").selectOption({ index: 1 });
-    await page.getByLabel("Chart x").selectOption("payment_type");
-    await page.getByLabel("Chart y").selectOption("trips");
+    await expect(page.getByTestId("chart-hint")).toHaveText("Choose a query to chart.");
+    await page.getByLabel("Data from").selectOption({ index: 1 });
+    await page.getByLabel("Across (x axis)").selectOption("payment_type");
+    await page.getByLabel("Up (y axis)").selectOption("trips");
     const bars = page.getByTestId("chart").locator(".mark-rect path");
     await expect(bars).toHaveCount(rows);
 
     await expect(page.getByTestId("sync-status")).toHaveText("Live");
     await page.reload();
-    await expect(page.getByLabel("Chart x")).toHaveValue("payment_type");
+    await expect(page.getByLabel("Across (x axis)")).toHaveValue("payment_type");
     await expect(page.getByTestId("chart").locator(".mark-rect path")).toHaveCount(rows);
   } finally {
     await api.deleteNotebook(page, notebookId);
@@ -132,7 +132,7 @@ test("a bar chart over daily timestamps draws visible bars", async ({ page }) =>
   const notebookId = await api.createNotebook(page, `E2E daily ${Date.now()}`);
   try {
     await page.goto(`/notebooks/${notebookId}`);
-    await page.getByRole("button", { name: "+ SQL" }).click();
+    await page.getByRole("button", { name: "+ Query" }).click();
     // date_trunc returns TIMESTAMP: the most common time chart.
     await typeInLastEditor(
       page,
@@ -141,9 +141,9 @@ test("a bar chart over daily timestamps draws visible bars", async ({ page }) =>
     await page.getByRole("button", { name: "Run" }).click();
     await expect(page.getByTestId("result-summary")).toContainText("31 rows");
     await page.getByRole("button", { name: "+ Chart" }).click();
-    await page.getByLabel("Chart data").selectOption({ index: 1 });
-    await page.getByLabel("Chart x").selectOption("day");
-    await page.getByLabel("Chart y").selectOption("trips");
+    await page.getByLabel("Data from").selectOption({ index: 1 });
+    await page.getByLabel("Across (x axis)").selectOption("day");
+    await page.getByLabel("Up (y axis)").selectOption("trips");
     const bars = page.getByTestId("chart").locator(".mark-rect path");
     await expect(bars).toHaveCount(31);
     const widths = await bars.evaluateAll((paths) =>
@@ -167,14 +167,14 @@ test("chart tooltips show image URLs as text without requesting them", async ({ 
   });
   try {
     await page.goto(`/notebooks/${notebookId}`);
-    await page.getByRole("button", { name: "+ SQL" }).click();
+    await page.getByRole("button", { name: "+ Query" }).click();
     await typeInLastEditor(page, `select '${url}' as image, 10 as title`);
     await page.getByRole("button", { name: "Run" }).click();
     await expect(page.getByTestId("result-summary")).toContainText("1 row");
     await page.getByRole("button", { name: "+ Chart" }).click();
-    await page.getByLabel("Chart data").selectOption({ index: 1 });
-    await page.getByLabel("Chart x").selectOption("image");
-    await page.getByLabel("Chart y").selectOption("title");
+    await page.getByLabel("Data from").selectOption({ index: 1 });
+    await page.getByLabel("Across (x axis)").selectOption("image");
+    await page.getByLabel("Up (y axis)").selectOption("title");
     const bar = page.getByTestId("chart").locator(".mark-rect path");
     await expect(bar).toHaveCount(1);
     await bar.hover();

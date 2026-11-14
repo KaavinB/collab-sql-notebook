@@ -93,7 +93,7 @@ describe("NotebookEditor", () => {
     await serve();
     act(() => providers.latest().drop());
     expect(screen.getByTestId("sync-status").textContent).toMatch(/^Offline/);
-    fireEvent.click(screen.getByRole("button", { name: "+ SQL" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ Query" }));
     expect(await screen.findByTestId("editor")).toBeTruthy();
   });
 
@@ -104,7 +104,7 @@ describe("NotebookEditor", () => {
     expect((await screen.findByTestId("sync-status")).textContent).toBe(
       "This notebook was deleted.",
     );
-    expect(screen.queryByRole("button", { name: "+ SQL" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "+ Query" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Notes" })).toBeTruthy(); // still readable
   });
 
@@ -123,14 +123,14 @@ describe("NotebookEditor", () => {
       });
     const { providers, serve } = renderEditor({ syncTicket });
     await serve();
-    expect(await screen.findByRole("button", { name: "+ SQL" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "+ Query" })).toBeTruthy();
     act(() => providers.latest().close(4403));
     // Reconnects with the new ticket, now as a viewer: still live, view-only.
     await waitFor(() => expect(providers.latest().connects).toBe(1));
     act(() => providers.latest().serve());
     await waitFor(() => expect(screen.getByTestId("view-only")).toBeTruthy());
     expect(screen.getByTestId("sync-status").textContent).toBe("Live");
-    expect(screen.queryByRole("button", { name: "+ SQL" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "+ Query" })).toBeNull();
   });
 
   it("explains why it can't connect at all", async () => {
@@ -180,7 +180,7 @@ describe("NotebookEditor", () => {
     const { providers, serve } = renderEditor();
     await serve();
     act(() => providers.latest().drop());
-    fireEvent.click(screen.getByRole("button", { name: "+ SQL" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ Query" }));
     cleanup(); // leave the page (e.g. "← Notebooks")
     expect(providers.latest().destroyed).toBe(false);
 
@@ -195,7 +195,7 @@ describe("NotebookEditor", () => {
     // Still offline: the kept document shows at once, and can still be edited.
     expect(await screen.findByTestId("editor")).toBeTruthy(); // the offline cell is still there
     expect(screen.getByTestId("sync-status").textContent).toMatch(/^Offline/);
-    expect(screen.getByRole("button", { name: "+ SQL" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "+ Query" })).toBeTruthy();
   });
 
   it("shows who is here", async () => {
@@ -334,14 +334,14 @@ describe("NotebookEditor", () => {
       for (const name of ["Run", "Move cell up", "Move cell down", "Delete cell", "Edit"]) {
         expect(screen.queryByRole("button", { name })).toBeNull();
       }
-      for (const name of ["+ SQL", "+ Markdown", "+ Chart"]) {
+      for (const name of ["+ Query", "+ Text", "+ Chart"]) {
         expect(screen.queryByRole("button", { name })).toBeNull();
       }
       // The SQL is shown read-only; the markdown is shown rendered.
       expect(screen.getByTestId("editor").getAttribute("data-readonly")).toBe("true");
       expect(screen.getByRole("heading", { name: "Notes" })).toBeTruthy();
       // The chart's settings are visible but can't be changed.
-      const chartData = screen.getByLabelText<HTMLSelectElement>("Chart data");
+      const chartData = screen.getByLabelText<HTMLSelectElement>("Data from");
       expect(chartData.disabled).toBe(true);
       // They can still see the last result and the members.
       await waitFor(() => expect(api.getRun).toHaveBeenCalledWith(NOTEBOOK.id, "r1"));
@@ -354,9 +354,9 @@ describe("NotebookEditor", () => {
       expect(screen.queryByTestId("view-only")).toBeNull();
       expect(screen.getByRole("button", { name: "Run" })).toBeTruthy();
       expect(screen.getAllByRole("button", { name: "Delete cell" })).toHaveLength(3);
-      expect(screen.getByRole("button", { name: "+ SQL" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "+ Query" })).toBeTruthy();
       expect(screen.getByTestId("editor").getAttribute("data-readonly")).toBe("false");
-      expect(screen.getByLabelText<HTMLSelectElement>("Chart data").disabled).toBe(false);
+      expect(screen.getByLabelText<HTMLSelectElement>("Data from").disabled).toBe(false);
       expect(
         screen.getByRole("button", { name: role === "owner" ? "Share" : "Members" }),
       ).toBeTruthy();
