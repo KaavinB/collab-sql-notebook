@@ -14,6 +14,7 @@ import * as Y from "yjs";
 
 import { NotebookEditor } from "@/components/notebook/NotebookEditor";
 import { ApiError, type ApiClient, type Notebook, type Run } from "@/lib/api";
+import { DEFAULT_CONFIRMATION_TIMINGS } from "@/lib/notebook/confirmations";
 import { appendCell, cellsMap, orderedCells, setLastRun } from "@/lib/notebook/doc";
 import { fakeApi, NOTEBOOK, USER } from "@/test/fakeApi";
 import { ticketFor } from "@/test/tickets";
@@ -101,7 +102,7 @@ describe("NotebookEditor", () => {
     const { providers, serve } = renderEditor();
     await serve(storedDocWithMarkdown("# Notes"));
     act(() => providers.latest().close(4404));
-    expect((await screen.findByTestId("sync-status")).textContent).toBe(
+    expect((await screen.findByTestId("sync-banner")).textContent).toBe(
       "This notebook was deleted.",
     );
     expect(screen.queryByRole("button", { name: "+ Query" })).toBeNull();
@@ -131,6 +132,76 @@ describe("NotebookEditor", () => {
     await waitFor(() => expect(screen.getByTestId("view-only")).toBeTruthy());
     expect(screen.getByTestId("sync-status").textContent).toBe("Live");
     expect(screen.queryByRole("button", { name: "+ Query" })).toBeNull();
+  });
+
+  it("says when offline edits are waiting to sync", async () => {
+    const { providers, serve } = renderEditor();
+    await serve();
+    act(() => providers.latest().drop());
+    expect(screen.getByTestId("sync-banner").textContent).toBe(
+      "Offline. Your edits will sync when the connection is back.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "+ Query" }));
+    expect(screen.getByTestId("sync-banner").textContent).toBe(
+      "Offline. Unsynced edits will sync when the connection is back.",
+    );
+    act(() => providers.latest().serve()); // back, and the server confirmed them
+    expect(screen.getByTestId("sync-status").textContent).toBe("Live");
+  });
+
+  it("shows Unsynced when a live-looking connection doesn't confirm an edit", async () => {
+    const { providers, serve } = renderEditor();
+    await serve();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "+ Query" }));
+      const status = screen.getByTestId("sync-status");
+      expect(status.textContent).toBe("Live"); // just sent
+      expect(status.dataset.confirmed).toBe("false");
+      await act(() => vi.advanceTimersByTimeAsync(DEFAULT_CONFIRMATION_TIMINGS.overdueMs));
+      expect(screen.getByTestId("sync-status").textContent).toMatch(/^Unsynced/);
+      act(() => providers.latest().answerProbes());
+      expect(screen.getByTestId("sync-status").textContent).toBe("Live");
+      expect(screen.getByTestId("sync-status").dataset.confirmed).toBe("true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reloads from the server, and says so, when made a viewer while holding unsynced edits", async () => {
+    const syncTicket = vi
+      .fn<ApiClient["syncTicket"]>()
+      .mockResolvedValueOnce({
+        ticket: ticketFor(USER.id, "1"),
+        url: "ws://sync.test",
+        role: "editor",
+      })
+      .mockResolvedValue({
+        ticket: ticketFor(USER.id, "2"),
+        url: "ws://sync.test",
+        role: "viewer",
+      });
+    const { providers, serve } = renderEditor({ syncTicket });
+    const stored = storedDocWithMarkdown("# Saved");
+    await serve(stored);
+    act(() => providers.latest().drop());
+    fireEvent.click(screen.getByRole("button", { name: "+ Query" })); // only in this tab
+    expect(await screen.findByTestId("editor")).toBeTruthy();
+    act(() => providers.latest().close(4403)); // reconnecting finds the role changed
+
+    expect((await screen.findByTestId("sync-notice")).textContent).toMatch(
+      /edits that hadn't reached the server weren't saved/,
+    );
+    // A new connection and a new document, from the server's copy.
+    await waitFor(() => expect(providers.created).toHaveLength(2));
+    expect(providers.created[0].destroyed).toBe(true);
+    act(() => providers.latest().serve(stored));
+    await waitFor(() => expect(screen.getByTestId("view-only")).toBeTruthy());
+    expect(screen.getByRole("heading", { name: "Saved" })).toBeTruthy();
+    expect(screen.queryByTestId("editor")).toBeNull(); // the unsaved SQL cell is gone
+    expect(screen.getByTestId("sync-status").textContent).toBe("Live");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("sync-notice")).toBeNull();
   });
 
   it("explains why it can't connect at all", async () => {

@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { DEFAULT_CONFIRMATION_TIMINGS } from "@/lib/notebook/confirmations";
 
 import {
   closeConnection,
@@ -77,6 +79,38 @@ describe("notebook connections", () => {
     const calm = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(calm);
     expect(calm.defaultPrevented).toBe(false);
+  });
+
+  it("keeps a connection until the server confirms edits sent just before the page went away", async () => {
+    const providers = fakeProviders();
+    const sync = openConnection(fakeApi(), NOTEBOOK.id, providers.factory);
+    await flush();
+    const provider = providers.latest();
+    provider.serve();
+    appendCell(sync.doc, "sql"); // sent on the live connection, not confirmed yet
+    closeConnection(NOTEBOOK.id, sync);
+    expect(provider.destroyed).toBe(false);
+    // Not at risk: a healthy connection delivers it, so closing the tab isn't blocked.
+    expect(hasUnsyncedEdits()).toBe(false);
+    provider.serve(); // the server confirms
+    expect(provider.destroyed).toBe(true);
+  });
+
+  it("guards closing the tab when sent edits go unconfirmed (a dead connection)", async () => {
+    vi.useFakeTimers();
+    try {
+      const providers = fakeProviders();
+      const sync = openConnection(fakeApi(), NOTEBOOK.id, providers.factory);
+      await vi.advanceTimersByTimeAsync(0);
+      providers.latest().serve();
+      appendCell(sync.doc, "sql");
+      await vi.advanceTimersByTimeAsync(DEFAULT_CONFIRMATION_TIMINGS.overdueMs);
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("discarding (sign-out) leaves nothing behind, even for a page that unmounts afterwards", async () => {

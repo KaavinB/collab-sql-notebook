@@ -117,7 +117,7 @@ test("removing a member closes their live connection", async ({ browser }) => {
       `${process.env.E2E_API_URL}/notebooks/${notebookId}/members/${graceMember.user_id}`,
       { headers: { Origin: process.env.E2E_WEB_URL! } },
     );
-    await expect(grace.getByTestId("sync-status")).toHaveText(
+    await expect(grace.getByTestId("sync-banner")).toHaveText(
       "You no longer have access to this notebook.",
     );
     await expect(grace.getByRole("button", { name: "+ Query" })).toHaveCount(0);

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 
 import { ApiError, type ApiClient } from "@/lib/api";
+import { DEFAULT_CONFIRMATION_TIMINGS } from "@/lib/notebook/confirmations";
 import { appendCell, orderedCells } from "@/lib/notebook/doc";
 import { connectNotebook, type NotebookSync } from "@/lib/notebook/sync";
 import { fakeApi, NOTEBOOK } from "@/test/fakeApi";
@@ -72,6 +73,86 @@ describe("connectNotebook", () => {
     await flush();
     providers.latest().remote(storedDoc());
     expect(sync.hasUnsyncedEdits()).toBe(false);
+    expect(sync.hasUnconfirmedEdits()).toBe(false);
+  });
+
+  it("knows when the server has confirmed edits typed while live", async () => {
+    vi.useFakeTimers();
+    const { sync, providers } = connect(fakeApi());
+    await vi.advanceTimersByTimeAsync(0);
+    const provider = providers.latest();
+    provider.serve();
+    appendCell(sync.doc, "sql");
+    // Sent on a live connection: not confirmed yet, but not at risk either.
+    expect(sync.hasUnconfirmedEdits()).toBe(true);
+    expect(sync.hasUnsyncedEdits()).toBe(false);
+    await vi.advanceTimersByTimeAsync(DEFAULT_CONFIRMATION_TIMINGS.probeDelayMs);
+    expect(provider.probes).toHaveLength(1);
+    provider.answerProbes();
+    expect(sync.hasUnconfirmedEdits()).toBe(false);
+  });
+
+  it("calls edits unsynced when a live-looking connection doesn't confirm them", async () => {
+    vi.useFakeTimers();
+    const { sync, providers } = connect(fakeApi());
+    await vi.advanceTimersByTimeAsync(0);
+    providers.latest().serve();
+    const listener = vi.fn();
+    sync.subscribe(listener);
+    appendCell(sync.doc, "sql"); // the probe goes out, and no answer ever comes
+    await vi.advanceTimersByTimeAsync(DEFAULT_CONFIRMATION_TIMINGS.overdueMs);
+    expect(sync.get().status).toBe("live");
+    expect(sync.hasUnsyncedEdits()).toBe(true);
+    expect(listener).toHaveBeenCalled(); // so the page shows it
+    providers.latest().answerProbes();
+    expect(sync.hasUnsyncedEdits()).toBe(false);
+  });
+
+  it("keeps offline edits unconfirmed until a reconnect's handshake is confirmed", async () => {
+    const { sync, providers } = connect(fakeApi());
+    await flush();
+    const provider = providers.latest();
+    provider.serve();
+    provider.drop();
+    appendCell(sync.doc, "sql");
+    provider.serve(undefined, { confirm: false }); // reconnected; edits sent, not confirmed
+    expect(sync.get().status).toBe("live");
+    expect(sync.hasUnconfirmedEdits()).toBe(true);
+  });
+
+  it("reloads from the server when a reconnect finds it demoted with unsynced edits", async () => {
+    const syncTicket = vi
+      .fn<ApiClient["syncTicket"]>()
+      .mockResolvedValueOnce(ticket("editor", token("user-a", "t1")))
+      .mockResolvedValueOnce(ticket("viewer", token("user-a", "t2")));
+    const { sync, providers } = connect(fakeApi({ syncTicket }));
+    await flush();
+    const provider = providers.latest();
+    provider.serve();
+    provider.drop();
+    appendCell(sync.doc, "sql", "offline-cell"); // edited while offline
+    provider.close(4403); // the owner made us a viewer meanwhile
+    await flush();
+    expect(sync.get()).toMatchObject({ status: "stopped", reason: "demoted", role: "editor" });
+    expect((sync.get() as { message: string }).message).toMatch(/weren't saved/);
+    expect(provider.connects).toBe(0); // never reconnects with edits it can't save
+  });
+
+  it("just turns view-only when demoted with nothing unsynced", async () => {
+    const syncTicket = vi
+      .fn<ApiClient["syncTicket"]>()
+      .mockResolvedValueOnce(ticket("editor", token("user-a", "t1")))
+      .mockResolvedValueOnce(ticket("viewer", token("user-a", "t2")));
+    const { sync, providers } = connect(fakeApi({ syncTicket }));
+    await flush();
+    const provider = providers.latest();
+    provider.serve();
+    appendCell(sync.doc, "sql");
+    provider.serve(); // confirmed
+    provider.close(4403);
+    await flush();
+    expect(sync.get()).toEqual({ status: "offline", role: "viewer" });
+    expect(provider.connects).toBe(1);
   });
 
   it.each([4401, 4403])(

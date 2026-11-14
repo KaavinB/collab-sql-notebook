@@ -30,6 +30,9 @@ export function NotebookEditor({
   const [notebook, setNotebook] = useState<Notebook | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [sync, setSync] = useState<NotebookSync | null>(null);
+  // Bumped to start over with a fresh connection and document (see below).
+  const [generation, setGeneration] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,12 +51,27 @@ export function NotebookEditor({
   // render) so React's development double-mount gets a fresh connection.
   // A connection with offline edits outlives the page until they're synced
   // (see connections.ts), so leaving through the app doesn't lose them.
+  // A connection stopped as "demoted" (made a viewer while holding edits
+  // the server never got) has a document with text that exists only in this
+  // tab, and a Yjs document can't drop changes. So the page starts over: the
+  // stopped connection is closed (stopped connections never linger) and a
+  // new one loads the server's copy, while a notice says what happened.
   useEffect(() => {
     const connection = openConnection(api, notebookId, createProvider);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- publishing an external object
     setSync(connection);
-    return () => closeConnection(notebookId, connection);
-  }, [api, notebookId, createProvider]);
+    const unsubscribe = connection.subscribe(() => {
+      const state = connection.get();
+      if (state.status === "stopped" && state.reason === "demoted") {
+        setNotice(state.message);
+        setGeneration((n) => n + 1);
+      }
+    });
+    return () => {
+      unsubscribe();
+      closeConnection(notebookId, connection);
+    };
+  }, [api, notebookId, createProvider, generation]);
 
   if (loadError) {
     return (
@@ -68,11 +86,43 @@ export function NotebookEditor({
     );
   }
   if (!notebook || !sync) return <p className="text-zinc-500">Loading notebook…</p>;
-  return <SyncedNotebook api={api} notebook={notebook} sync={sync} />;
+  return (
+    <>
+      {notice && (
+        <div
+          role="alert"
+          className="mb-4 flex items-start gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+          data-testid="sync-notice"
+        >
+          <span className="flex-1">{notice}</span>
+          <button onClick={() => setNotice(null)} className="text-xs underline">
+            Dismiss
+          </button>
+        </div>
+      )}
+      {/* Keyed by connection, so a new one starts from "Connecting…". */}
+      <SyncedNotebook key={generation} api={api} notebook={notebook} sync={sync} />
+    </>
+  );
 }
 
 function useSyncState(sync: NotebookSync): SyncState {
   return useSyncExternalStore(sync.subscribe, sync.get, sync.get);
+}
+
+/** Whether edits are at risk (offline, or unconfirmed for too long); re-renders when it changes. */
+function useUnsynced(sync: NotebookSync): boolean {
+  return useSyncExternalStore(sync.subscribe, sync.hasUnsyncedEdits, sync.hasUnsyncedEdits);
+}
+
+/**
+ * Whether the sync server has confirmed every edit made in this tab:
+ * applied to its copy in memory. It writes them to Postgres shortly after,
+ * so this isn't "saved to disk".
+ */
+function useConfirmed(sync: NotebookSync): boolean {
+  const confirmed = () => !sync.hasUnconfirmedEdits();
+  return useSyncExternalStore(sync.subscribe, confirmed, confirmed);
 }
 
 /** Waits for the first sync, then shows the notebook with its live status. */
@@ -86,6 +136,8 @@ function SyncedNotebook({
   sync: NotebookSync;
 }) {
   const state = useSyncState(sync);
+  const unsynced = useUnsynced(sync);
+  const confirmed = useConfirmed(sync);
   const me = useOptionalSession()?.user;
   const awareness = sync.awareness();
   // Our own entry in the presence list. Yjs never lets a peer's copy replace
@@ -101,6 +153,11 @@ function SyncedNotebook({
   // earlier visit (with offline edits) already has the document to show.
   if (!loaded && (state.status === "live" || state.status === "offline")) setLoaded(true);
 
+  // The page is about to replace this connection (see NotebookEditor), so
+  // its document, with edits that weren't saved, isn't shown again.
+  if (state.status === "stopped" && state.reason === "demoted") {
+    return <p className="text-zinc-500">Reloading the notebook…</p>;
+  }
   if (!loaded) {
     if (state.status === "stopped") {
       return (
@@ -127,34 +184,100 @@ function SyncedNotebook({
         doc={sync.doc}
         notebook={{ ...notebook, role }}
         readOnly={readOnly}
-        status={<SyncStatusLabel state={state} />}
+        status={<SyncStatusLabel state={state} unsynced={unsynced} confirmed={confirmed} />}
+        banner={<SyncBanner state={state} unsynced={unsynced} />}
         presence={<Presence awareness={awareness} />}
       />
     </AwarenessContext.Provider>
   );
 }
 
-function SyncStatusLabel({ state }: { state: SyncState }) {
-  if (state.status === "stopped") {
-    return (
-      <span role="alert" className="ml-auto text-xs text-red-600" data-testid="sync-status">
-        {state.message}
-      </span>
-    );
+/**
+ * The connection's status: a word or two for the header's pill, and, when
+ * there's more to say, a sentence for the banner under the header (the pill
+ * is one truncated line, so explanations and stop reasons don't go there).
+ *
+ * "Unsynced" means the server hasn't confirmed this tab's edits: on a
+ * connection that looks live but hasn't answered in a while (it has
+ * probably died; the provider reconnects once it notices, and the edits are
+ * sent again). Offline, the banner says whether edits are waiting.
+ */
+export function describeSync(
+  state: SyncState,
+  unsynced: boolean,
+): { short: string; message: string | null; tone: "calm" | "warn" | "error" } {
+  switch (state.status) {
+    case "stopped":
+      return { short: "Disconnected", message: state.message, tone: "error" };
+    case "offline":
+      return {
+        short: "Offline",
+        message: unsynced
+          ? "Offline. Unsynced edits will sync when the connection is back."
+          : "Offline. Your edits will sync when the connection is back.",
+        tone: "warn",
+      };
+    case "live":
+      return unsynced
+        ? {
+            short: "Unsynced",
+            message: "Unsynced. Waiting for the server to confirm your latest edits.",
+            tone: "warn",
+          }
+        : { short: "Live", message: null, tone: "calm" };
+    default:
+      return { short: "Connecting…", message: null, tone: "calm" };
   }
-  const label =
-    state.status === "live"
-      ? "Live"
-      : state.status === "offline"
-        ? "Offline. Your edits will sync when the connection is back."
-        : "Connecting…";
+}
+
+const TONE_TEXT = {
+  calm: "text-zinc-500",
+  warn: "text-amber-700 dark:text-amber-400",
+  error: "text-red-600",
+} as const;
+
+/**
+ * The pill's text. `data-confirmed` says whether the server has confirmed
+ * every edit, including ones sent a moment ago (not shown: it flickers while
+ * typing; tests wait on it).
+ */
+function SyncStatusLabel({
+  state,
+  unsynced,
+  confirmed,
+}: {
+  state: SyncState;
+  unsynced: boolean;
+  confirmed: boolean;
+}) {
+  const { short, tone } = describeSync(state, unsynced);
   return (
     <span
       role="status"
-      className={`ml-auto text-xs ${state.status === "offline" ? "text-amber-700" : "text-zinc-500"}`}
+      className={`text-xs ${TONE_TEXT[tone]}`}
       data-testid="sync-status"
+      data-confirmed={String(confirmed)}
     >
-      {label}
+      {short}
     </span>
+  );
+}
+
+/** The full sentence, under the header, when the status needs explaining. */
+function SyncBanner({ state, unsynced }: { state: SyncState; unsynced: boolean }) {
+  const { message, tone } = describeSync(state, unsynced);
+  if (!message) return null;
+  const colors =
+    tone === "error"
+      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
+      : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200";
+  return (
+    <p
+      role={tone === "error" ? "alert" : "status"}
+      className={`rounded-lg border px-3 py-2 text-sm ${colors}`}
+      data-testid="sync-banner"
+    >
+      {message}
+    </p>
   );
 }

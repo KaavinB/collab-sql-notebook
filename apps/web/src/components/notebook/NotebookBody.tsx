@@ -81,6 +81,7 @@ export function LoadedNotebook({
   notebook,
   readOnly,
   status,
+  banner,
   presence,
 }: {
   api: ApiClient;
@@ -88,7 +89,10 @@ export function LoadedNotebook({
   notebook: Notebook;
   /** Viewers read; the API refuses their writes and the sync server drops their edits. */
   readOnly: boolean;
+  /** The connection's state in a word or two, for the header's pill. */
   status: React.ReactNode;
+  /** A sentence explaining the connection's state, under the header, when it needs one. */
+  banner?: React.ReactNode;
   presence: React.ReactNode;
 }) {
   const cells = useCells(doc);
@@ -181,6 +185,7 @@ export function LoadedNotebook({
           <SharePanel api={api} notebook={notebook} />
         </div>
       </div>
+      {banner}
 
       {readOnly ? (
         <h1 className="text-3xl font-semibold tracking-tight">{notebook.title}</h1>
@@ -560,12 +565,12 @@ function TitleEditor({ api, notebook }: { api: ApiClient; notebook: Notebook }) 
 }
 
 /**
- * The live-sync status, in a pill in the header. The status text comes from
- * the sync code and can be a whole sentence ("Offline. Unsynced edits will
- * sync when you reconnect."), so the pill shows the start of it on one line
- * (the first word says the state) and the full sentence in its tooltip. Only
- * when live does the tooltip explain that there's no Save button: while
- * offline or unsynced, changes aren't shared yet.
+ * The live-sync status, in a pill in the header: a word or two ("Live",
+ * "Offline", "Unsynced"). Anything longer (why it's offline, why the
+ * connection stopped) goes in the banner under the header, because the pill
+ * is one line and truncates. Only when live does the tooltip explain that
+ * there's no Save button: while offline or unsynced, changes aren't shared
+ * yet.
  */
 function StatusPill({ children }: { children: React.ReactNode }) {
   const pill = useRef<HTMLSpanElement>(null);

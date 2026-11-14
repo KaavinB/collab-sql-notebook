@@ -8,9 +8,11 @@ import { Connection, MAX_BUFFERED_BYTES } from "../src/connection.ts";
 import { DEFAULT_TIMINGS, Room } from "../src/room.ts";
 import { NotebookGoneError, Store, type LoadedDocument } from "../src/store.ts";
 import {
+  cellOf,
   closeClient,
   connectClient,
   createNotebook,
+  docWithSqlCell,
   member,
   newPool,
   startServer,
@@ -215,5 +217,43 @@ describe("backpressure", () => {
     });
     for (let i = 0; i < 5; i++) conn.receive(new Uint8Array(2 * 1024 * 1024));
     expect(close).toHaveBeenCalledWith(1013, "too many messages before the document loaded");
+  });
+});
+
+describe("a crash right after a change the server made itself", () => {
+  it("leaves a viewer holding that change, which was never saved (known limit)", async () => {
+    const nb = await createNotebook(pool, Y.encodeStateAsUpdate(docWithSqlCell("c1")));
+    const viewer = await member(pool, nb, "viewer");
+    // A long batching interval: nothing is written before the crash.
+    const first = await startServer({ pool, timings: { flushIntervalMs: 60_000 } });
+    const doc = new Y.Doc();
+    const v = connectClient(first, nb, ticketFor(viewer, nb), doc);
+    await synced(v);
+    first.sync.manager.handleEvent({
+      type: "run_started",
+      notebookId: nb,
+      cellId: "c1",
+      executionId: "e1",
+      userName: "Ada",
+      startedAt: "2026-01-01T00:00:00Z",
+      expiresAt: null,
+    });
+    await waitFor(() => cellOf(doc, "c1")?.get("running") != null, "the viewer to see the run");
+    // The process dies: the room's unsaved change goes with it.
+    for (const room of first.sync.manager.rooms.values()) room.destroy();
+    first.sync.manager.rooms.clear();
+    v.provider.destroy();
+    await first.sync.stop();
+
+    const second = await startServer({ pool });
+    servers.push(second);
+    const again = connectClient(second, nb, ticketFor(viewer, nb), doc);
+    clients.push(again);
+    await synced(again);
+    expect(cellOf(await storedDoc(pool, nb), "c1")?.get("running")).toBeUndefined();
+    // An editor would send it back when reconnecting. A viewer is never
+    // asked for its changes (the server would drop them anyway), so it
+    // keeps showing a change nobody else has, until it reloads the page.
+    expect(cellOf(doc, "c1")?.get("running")).toMatchObject({ executionId: "e1" });
   });
 });

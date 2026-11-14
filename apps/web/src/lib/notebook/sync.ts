@@ -25,6 +25,24 @@
  * Repeated ticket refusals back off (1 s doubling to 15 s), so a server
  * misconfiguration can't turn every open tab into a reconnect loop.
  *
+ * Unsynced edits: the server confirms what it received (see
+ * confirmations.ts), so this tab knows which of its edits the server has.
+ * Edits are "unsynced" while they wait for a connection (offline), or when
+ * they were sent but not confirmed in time (a connection that died without
+ * either side noticing yet). The page shows that, and warns before the tab
+ * closes.
+ *
+ * The browser's offline and online events are used as hints: going offline
+ * drops the socket at once (the page says "Offline" instead of looking live
+ * on a dead connection), and coming back online reconnects at once instead
+ * of waiting out the provider's backoff or its 30 s watchdog.
+ *
+ * Losing edit rights with unconfirmed edits (an owner made you a viewer
+ * while you were offline): the server will never take those edits, so the
+ * connection stops with reason "demoted" and the page loads the notebook
+ * again from the server, saying the edits weren't saved. Otherwise the tab
+ * would keep showing text that exists only in it.
+ *
  * BroadcastChannel is off: by default y-websocket also syncs tabs of the
  * same browser directly, bypassing the server. A view-only tab and an
  * editing tab of the same browser would then share edits, and the
@@ -35,6 +53,12 @@ import type { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
 import { ApiError, type ApiClient, type Role } from "@/lib/api";
+import {
+  EditConfirmations,
+  trackingWebSocket,
+  type ConfirmationTimings,
+  type WireTap,
+} from "@/lib/notebook/confirmations";
 
 export type SyncState =
   /** Opening the first connection. The document isn't loaded yet. */
@@ -46,7 +70,14 @@ export type SyncState =
   /** Stopped for good; `message` says why. */
   | { status: "stopped"; role: Role | null; reason: StopReason; message: string };
 
-export type StopReason = "deleted" | "no-access" | "signed-out" | "unavailable" | "rejected";
+export type StopReason =
+  | "deleted"
+  | "no-access"
+  | "signed-out"
+  | "unavailable"
+  | "rejected"
+  /** Now a viewer, with edits the server never got: the page loads the document again. */
+  | "demoted";
 
 /** The parts of y-websocket's provider this module uses (so tests can fake it). */
 export interface Provider {
@@ -60,17 +91,24 @@ export interface Provider {
   on(event: "closed", handler: (event: { code: number; reason: string }) => void): void;
 }
 
+/**
+ * Makes the provider. `tap` must see every frame its sockets send and
+ * receive (the real factory wraps the WebSocket class), so the server's
+ * confirmations can be tracked.
+ */
 export type ProviderFactory = (
   serverUrl: string,
   room: string,
   doc: Y.Doc,
   ticket: string,
+  tap: WireTap,
 ) => Provider;
 
-const defaultFactory: ProviderFactory = (serverUrl, room, doc, ticket) =>
+const defaultFactory: ProviderFactory = (serverUrl, room, doc, ticket, tap) =>
   new WebsocketProvider(serverUrl, room, doc, {
     params: { ticket },
     disableBc: true,
+    WebSocketPolyfill: trackingWebSocket(tap),
     // Close codes 4400-4499 stop the provider (its default). This module
     // handles them: refresh the ticket, or stop and say why.
   }) as unknown as Provider;
@@ -83,9 +121,16 @@ export interface NotebookSync {
   /** The provider's awareness, once connected; null before the first ticket. */
   awareness(): Awareness | null;
   get(): SyncState;
+  /** Called when the state changes, and when either of the edit checks below changes. */
   subscribe(listener: () => void): () => void;
-  /** True while there are local edits the server hasn't confirmed (offline edits). */
+  /**
+   * Edits at risk: waiting for a connection, or sent but unconfirmed for too
+   * long (the connection is probably dead). The page shows these as
+   * "Unsynced", and the close-tab guard checks them.
+   */
   hasUnsyncedEdits(): boolean;
+  /** Any local edit the server hasn't confirmed yet, including one sent a moment ago. */
+  hasUnconfirmedEdits(): boolean;
   destroy(): void;
 }
 
@@ -93,6 +138,7 @@ export function connectNotebook(
   api: ApiClient,
   notebookId: string,
   createProvider: ProviderFactory = defaultFactory,
+  confirmationTimings: Partial<ConfirmationTimings> = {},
 ): NotebookSync {
   const doc = new Y.Doc();
   const listeners = new Set<() => void>();
@@ -100,8 +146,8 @@ export function connectNotebook(
   let provider: Provider | null = null;
   let destroyed = false;
   let loaded = false;
-  let connected = false;
-  let editedWhileOffline = false;
+  // A ticket refresh is under way: it reconnects by itself, with the new ticket.
+  let awaitingTicket = false;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let ticketDelay = TICKET_RETRY_INITIAL_MS;
   // Ticket refusals (4401/4403) in a row without reaching sync. If the API
@@ -110,10 +156,13 @@ export function connectNotebook(
   // keeps each open tab from hammering both servers.
   let refusals = 0;
 
+  const notify = () => {
+    if (!destroyed) listeners.forEach((listener) => listener());
+  };
   const set = (next: SyncState) => {
     if (destroyed) return;
     state = next;
-    listeners.forEach((listener) => listener());
+    notify();
   };
   const role = () => state.role;
 
@@ -122,10 +171,16 @@ export function connectNotebook(
     set({ status: "stopped", role: role(), reason, message });
   };
 
-  // Edits made while disconnected are only in this tab until it reconnects.
-  doc.on("update", (_update: Uint8Array, origin: unknown) => {
-    if (origin !== provider && !connected) editedWhileOffline = true;
-  });
+  // Created before the provider, so it counts each local edit before the
+  // provider sends it. Changes the provider applies came from the server.
+  const confirmations = new EditConfirmations(
+    doc,
+    (origin) => provider !== null && origin === provider,
+    notify,
+    confirmationTimings,
+  );
+  const hasUnsyncedEdits = () =>
+    confirmations.unconfirmed() && (state.status !== "live" || confirmations.overdue());
 
   /** Gets a ticket; on a definitive refusal, stops and returns null. Retries transient failures. */
   const fetchTicket = async (): Promise<{ ticket: string; url: string; role: Role } | null> => {
@@ -173,7 +228,7 @@ export function connectNotebook(
     return user !== null && user === owner;
   };
 
-  const reconnectWithNewTicket = async () => {
+  const refreshTicketAndReconnect = async () => {
     refusals++;
     if (refusals > 1) {
       const delay = Math.min(TICKET_RETRY_INITIAL_MS * 2 ** (refusals - 2), TICKET_RETRY_MAX_MS);
@@ -188,6 +243,16 @@ export function connectNotebook(
       stop("signed-out", "You're signed in as someone else now. Reload the page to continue.");
       return;
     }
+    if (ticket.role === "viewer" && role() !== "viewer" && confirmations.unconfirmed()) {
+      // The server drops a viewer's edits, so these can never be saved.
+      // Stopping lets the page start over from the server's copy.
+      stop(
+        "demoted",
+        "You can only view this notebook now, so your edits that hadn't reached the server " +
+          "weren't saved. The notebook was reloaded from the server.",
+      );
+      return;
+    }
     provider.params = { ticket: ticket.ticket };
     set(
       loaded
@@ -195,6 +260,15 @@ export function connectNotebook(
         : { status: "connecting", role: ticket.role },
     );
     provider.connect();
+  };
+
+  const reconnectWithNewTicket = async () => {
+    awaitingTicket = true;
+    try {
+      await refreshTicketAndReconnect();
+    } finally {
+      awaitingTicket = false;
+    }
   };
 
   const onClosed = ({ code }: { code: number }) => {
@@ -209,23 +283,44 @@ export function connectNotebook(
     if (!ticket || destroyed) return;
     sameOwner(ticket.ticket);
     set({ status: "connecting", role: ticket.role });
-    const created = createProvider(`${ticket.url}/notebooks`, notebookId, doc, ticket.ticket);
+    const created = createProvider(
+      `${ticket.url}/notebooks`,
+      notebookId,
+      doc,
+      ticket.ticket,
+      confirmations,
+    );
     provider = created;
     created.on("status", ({ status }) => {
-      connected = status === "connected";
-      if (!connected && loaded && state.status === "live") {
+      if (status !== "connected" && loaded && state.status === "live") {
         set({ status: "offline", role: state.role });
       }
     });
     created.on("sync", (synced) => {
       if (!synced || state.status === "stopped") return;
       loaded = true;
-      editedWhileOffline = false;
       refusals = 0;
       set({ status: "live", role: role() ?? ticket.role });
     });
     created.on("closed", onClosed);
   })();
+
+  // Opens a fresh socket now. Skipped before the first sync (the provider
+  // is already trying), after stopping, and while a ticket is being
+  // refreshed (that reconnects by itself, with the new ticket).
+  const reconnectNow = () => {
+    if (!provider || awaitingTicket || !loaded || state.status === "stopped") return;
+    provider.disconnect();
+    provider.connect();
+  };
+  const onOffline = () => {
+    if (state.status === "live") reconnectNow();
+  };
+  const hasWindow = typeof window !== "undefined";
+  if (hasWindow) {
+    window.addEventListener("offline", onOffline);
+    window.addEventListener("online", reconnectNow);
+  }
 
   return {
     doc,
@@ -235,11 +330,17 @@ export function connectNotebook(
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    hasUnsyncedEdits: () => editedWhileOffline,
+    hasUnsyncedEdits,
+    hasUnconfirmedEdits: () => confirmations.unconfirmed(),
     destroy() {
       destroyed = true;
       if (retryTimer) clearTimeout(retryTimer);
+      if (hasWindow) {
+        window.removeEventListener("offline", onOffline);
+        window.removeEventListener("online", reconnectNow);
+      }
       listeners.clear();
+      confirmations.destroy();
       provider?.destroy();
       doc.destroy();
     },

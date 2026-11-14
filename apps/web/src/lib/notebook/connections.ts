@@ -5,15 +5,19 @@
  * A notebook page opens a connection and closes it when it unmounts. If the
  * tab was offline and the user edited, closing it would throw those edits
  * away, and leaving through the app (← Notebooks) fires no browser warning.
- * So a connection with unsynced edits lingers instead: it keeps trying to
- * reconnect, and is closed once the server has the edits. Opening the same
- * notebook again picks the lingering connection back up, edits included.
+ * So a connection whose edits the server hasn't confirmed lingers instead:
+ * it keeps trying to reconnect, and is closed once the server has confirmed
+ * every edit (see confirmations.ts). Opening the same notebook again picks
+ * the lingering connection back up, edits included.
  *
- * "Unsynced" means edits made while the provider knew it was disconnected.
- * A connection that silently died (a half-open socket the provider hasn't
- * noticed yet) isn't detected until its watchdog notices; checking against
- * the server's state vector would close that gap (offline handling is
- * hardened later).
+ * Two levels of "not confirmed yet" (see NotebookSync):
+ * - unconfirmed: any edit the server hasn't confirmed, including one sent a
+ *   moment ago. A connection lingers until there are none.
+ * - unsynced: edits at risk (waiting for a connection, or sent and not
+ *   confirmed in time). The close-tab guard and the sign-out check use this,
+ *   so they don't interrupt someone who closes the tab right after typing
+ *   on a healthy connection: an edit already sent on an open socket leaves
+ *   before the socket closes.
  */
 import type { ApiClient } from "@/lib/api";
 import { connectNotebook, type NotebookSync, type ProviderFactory } from "@/lib/notebook/sync";
@@ -64,19 +68,16 @@ export function closeConnection(notebookId: string, sync: NotebookSync): void {
   // connection before the pages unmount). It's destroyed; keeping it would
   // leave a dead connection that looks unsynced forever.
   if (!open.delete(sync)) return;
-  const done = () => !sync.hasUnsyncedEdits() || sync.get().status === "stopped";
+  // Done once the server has confirmed every edit, or once it never will
+  // (stopped: no access, deleted, signed out), when keeping it can't help.
+  const done = () => !sync.hasUnconfirmedEdits() || sync.get().status === "stopped";
   if (done()) {
     sync.destroy();
     return;
   }
   lingering.set(sync, notebookId);
   const unsubscribe = sync.subscribe(() => {
-    // Synced: the server has everything. This relies on the sync server
-    // asking for our missing edits (sync step 1) before it sends its own
-    // state (step 2, which marks us synced): our edits then leave before
-    // destroy() closes the socket. See Room.open in apps/sync. Stopped: it never will (no access,
-    // deleted, signed out), and keeping it wouldn't help.
-    if (sync.get().status === "live" ? !sync.hasUnsyncedEdits() : done()) {
+    if (done()) {
       lingering.delete(sync);
       unsubscribe();
       stopWatching.delete(sync);
