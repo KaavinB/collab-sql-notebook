@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     query_max_result_bytes: int = Field(default=5_000_000, ge=1_000)
     # How long a request waits for a free worker before it's refused as busy.
     query_queue_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    # Stored runs kept per notebook, across all its cells (each cell also
+    # keeps at most 3). Without it, an editor could store runs for any number
+    # of made-up cell IDs. Past the cap the oldest runs of other cells go
+    # first, and each cell's latest run outlasts older ones. With the default
+    # result cap that bounds a notebook's stored results to roughly
+    # 100 x QUERY_MAX_RESULT_BYTES. At least 3, the runs one cell keeps.
+    query_runs_kept_per_notebook: int = Field(default=100, ge=3, le=100_000)
 
     # Browser origins allowed to call the API. Set as a comma-separated string.
     api_cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
@@ -129,6 +136,12 @@ class Settings(BaseSettings):
     # default 2). 4 lets a few people use the assistant at once. A starting
     # value, not tuned; per process, so several API processes multiply it.
     ai_max_concurrent: int = Field(default=4, ge=1, le=64)
+    # Finished AI requests kept per notebook in the request log, with their
+    # decided suggestions; older ones are deleted, oldest first. A request
+    # still running, or whose suggestion still waits for a decision, is never
+    # deleted. So the log holds each notebook's most recent requests, not
+    # every request ever made.
+    ai_requests_kept_per_notebook: int = Field(default=500, ge=1, le=1_000_000)
     # Answer with canned, deterministic replies instead of calling Claude, so
     # end-to-end tests run without a key. Same loopback-only rule as
     # AUTH_DEV_LOGIN: refused anywhere a real user could reach it.

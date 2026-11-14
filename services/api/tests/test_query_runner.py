@@ -138,6 +138,43 @@ async def test_parent_kills_a_worker_that_does_not_answer(
     assert (await runner.run("select 2 as x"))["rows"] == [[2]]
 
 
+# Planning folds these constants, building and hashing twenty 100 MB strings
+# one after another: DuckDB's interrupt isn't checked while planning, so only
+# the parent's kill stops it. One string at a time keeps the worker's memory
+# well under the 1024 MB RLIMIT_DATA cap these tests use on Linux, so the
+# outcome there is the kill too, not an out-of-memory error.
+CONSTANT_FOLDING = "select " + " || ".join(
+    f"md5(repeat('{chr(ord('a') + i)}', 100000000))" for i in range(20)
+)
+
+
+@pytest.mark.parametrize("mode", ["run", "explain"])
+async def test_constant_folding_is_bounded_by_the_kill(
+    runner: QueryRunner, mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # EXPLAIN (the AI validator's check) gets the same hard limit as a query:
+    # the worker is killed at the timeout plus the kill grace, not left to
+    # finish planning, and a fresh worker takes its place. A short grace
+    # leaves the folding a wide margin to still be running at the kill.
+    monkeypatch.setattr(runner_module, "KILL_GRACE_SECONDS", 0.5)
+    before = set(runner._all)
+    started = time.monotonic()
+    with pytest.raises(QueryFailedError) as info:
+        if mode == "explain":
+            await runner.explain(CONSTANT_FOLDING)
+        else:
+            await runner.run(CONSTANT_FOLDING)
+    elapsed = time.monotonic() - started
+    assert info.value.kind == "timeout"
+    assert elapsed < LIMITS.timeout_seconds + runner_module.KILL_GRACE_SECONDS + 1.5
+    killed = before - set(runner._all)
+    assert len(killed) == 1
+    await _wait_for_pool_size(runner, 2)
+    (worker,) = killed
+    assert worker.process.poll() is not None
+    assert (await runner.run("select 5 as x"))["rows"] == [[5]]
+
+
 async def test_a_crashed_worker_is_reported_and_replaced(runner: QueryRunner) -> None:
     async def crash_soon() -> None:
         await asyncio.sleep(0.1)

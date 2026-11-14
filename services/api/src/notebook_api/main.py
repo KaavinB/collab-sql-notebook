@@ -93,6 +93,7 @@ def build_ai_service(
         SchemaCache(runner, settings.query_row_limit),
         DuckDbValidator(runner, private_paths),
         max_concurrent=settings.ai_max_concurrent,
+        requests_kept_per_notebook=settings.ai_requests_kept_per_notebook,
         # Logged with every request, so results can be compared across settings.
         logged_settings={"effort": settings.ai_effort, "refusal_fallbacks": fallbacks},
     )
@@ -123,7 +124,12 @@ def create_app(
                 await runner.start()
             app.state.query_runner = runner
             if runner is not None and app.state.sessions is not None:
-                executions = Executions(app.state.sessions, runner, lock_ttl_seconds(settings))
+                executions = Executions(
+                    app.state.sessions,
+                    runner,
+                    lock_ttl_seconds(settings),
+                    runs_kept_per_notebook=settings.query_runs_kept_per_notebook,
+                )
             app.state.executions = executions
             ai = build_ai_service(settings, app.state.sessions, runner, model_client)
             app.state.ai = ai

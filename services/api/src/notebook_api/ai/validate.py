@@ -17,6 +17,7 @@ from typing import Protocol
 
 from notebook_api.ai.extract import clip
 from notebook_api.ai.pipeline import AssistantUnavailableError
+from notebook_api.query.paths import PathScrubber, private_paths
 from notebook_api.query.runner import QueryFailedError
 from notebook_api.query.validate import MAX_SQL_CHARS, QueryRejectedError
 
@@ -34,10 +35,11 @@ class Explainer(Protocol):
 def notebook_private_paths(db_path: Path, spill_root: Path) -> list[Path]:
     """Server paths removed from validation errors before they're logged or sent to the model.
 
-    The database file, its directory and the spill directory. Shared by the
+    The database file and the spill directory: the same list
+    the query workers clean their own errors and results with. Shared by the
     notebook's assistant and the eval, so both see exactly the same errors.
     """
-    return [db_path, db_path.parent, spill_root]
+    return private_paths(db_path, spill_root)
 
 
 class DuckDbValidator:
@@ -46,9 +48,7 @@ class DuckDbValidator:
     def __init__(self, runner: Explainer, private_paths: Iterable[Path] = ()) -> None:
         """`private_paths`: server paths to remove from errors (database file, spill dir)."""
         self._runner = runner
-        # Longest first, so a path is replaced before any prefix of it is.
-        names = {str(path) for path in private_paths if str(path) not in ("", ".", "/")}
-        self._private = sorted(names, key=len, reverse=True)
+        self._scrubber = PathScrubber(private_paths)
 
     async def validate(self, sql: str) -> str | None:
         if len(sql) > MAX_SQL_CHARS:
@@ -70,6 +70,4 @@ class DuckDbValidator:
         # That excerpt quotes the regenerated EXPLAIN statement rather than
         # the model's own text, so it would confuse more than help.
         message = message.split("\n\n", 1)[0].strip()
-        for path in self._private:
-            message = message.replace(path, "<server path>")
-        return clip(message, ERROR_MAX_CHARS)
+        return clip(self._scrubber.text(message), ERROR_MAX_CHARS)

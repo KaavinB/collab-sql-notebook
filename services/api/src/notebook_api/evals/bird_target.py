@@ -6,7 +6,8 @@ from notebook_api.ai.pipeline import SchemaContext, Validator
 from notebook_api.evals.bird import BirdDataset, BirdQuestion
 from notebook_api.evals.execution import ExecOutcome
 from notebook_api.evals.runner import EvalQuestion
-from notebook_api.evals.sqlite_db import SqliteValidator, execute_query, sqlite_schema_context
+from notebook_api.evals.sandbox import SandboxPool, sqlite_job
+from notebook_api.evals.sqlite_db import SqliteValidator, sqlite_schema_context
 
 
 def bird_eval_question(question: BirdQuestion) -> EvalQuestion:
@@ -22,11 +23,26 @@ def bird_eval_question(question: BirdQuestion) -> EvalQuestion:
 
 
 class BirdTarget:
-    def __init__(self, dataset: BirdDataset, *, timeout_seconds: float, row_cap: int) -> None:
+    def __init__(
+        self,
+        dataset: BirdDataset,
+        *,
+        timeout_seconds: float,
+        row_cap: int,
+        processes: int = 4,
+    ) -> None:
+        """`processes`: query processes kept between queries (the run's concurrency)."""
         self._dataset = dataset
         self._timeout_seconds = timeout_seconds
         self._row_cap = row_cap
         self._schemas: dict[str, asyncio.Task[SchemaContext]] = {}
+        # Model-written SQL runs in killable child processes: SQLite's
+        # progress handler can't stop a single function call that builds a
+        # huge value (see evals/sandbox.py).
+        self._processes = SandboxPool(max_idle=processes)
+
+    def close(self) -> None:
+        self._processes.close()
 
     async def schema(self, database: str) -> SchemaContext:
         # Built once per database per run, and shared by every question on it.
@@ -41,10 +57,12 @@ class BirdTarget:
         return SqliteValidator(self._dataset.database_path(database))
 
     async def execute(self, database: str, sql: str) -> ExecOutcome:
-        return await asyncio.to_thread(
-            execute_query,
+        job = sqlite_job(
             self._dataset.database_path(database),
             sql,
             timeout_seconds=self._timeout_seconds,
             row_cap=self._row_cap,
+        )
+        return await asyncio.to_thread(
+            self._processes.run, job, timeout_seconds=self._timeout_seconds
         )

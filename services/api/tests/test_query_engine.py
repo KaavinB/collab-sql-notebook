@@ -5,7 +5,13 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from notebook_api.query.engine import EngineLimits, QueryTimeoutError, execute, open_connection
+from notebook_api.query.engine import (
+    EngineLimits,
+    QueryTimeoutError,
+    execute,
+    explain,
+    open_connection,
+)
 from notebook_api.query.validate import PreparedQuery, prepare_query
 
 LIMITS = EngineLimits(
@@ -170,3 +176,20 @@ def test_known_conversion_limitations(
     con: duckdb.DuckDBPyConnection, sql: str, expected: str
 ) -> None:
     assert execute(con, _raw(sql), LIMITS)["rows"] == [[expected]]
+
+
+def test_explain_asks_for_json_so_a_folded_constant_is_not_drawn(
+    query_db: Path, tmp_path: Path
+) -> None:
+    # The optimizer folds this into a 60 MB constant while planning. Drawing
+    # a plan that holds such a constant as text (plain EXPLAIN) is far slower
+    # than planning it, while the JSON form skips the drawing. This test's
+    # 2 s limit is chosen to sit between the two: with a text plan the
+    # interrupt lands while the plan is drawn and explain() raises
+    # QueryTimeoutError, so the test fails if EXPLAIN goes back to text.
+    limits = EngineLimits(**{**LIMITS.__dict__, "timeout_seconds": 2.0})
+    connection = open_connection(query_db, tmp_path / "spill-explain", limits)
+    try:
+        explain(connection, _raw("SELECT length(repeat('x', 60000000))"), limits)
+    finally:
+        connection.close()

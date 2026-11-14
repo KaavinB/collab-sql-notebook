@@ -48,6 +48,9 @@ from notebook_api.query.validate import QueryRejectedError
 # Older runs of a cell are pruned. A few are kept, not just the latest, so a
 # client that is a moment behind can still load the run it was told about.
 RUNS_KEPT_PER_CELL = 3
+# Runs kept per notebook, across its cells: the default of the
+# QUERY_RUNS_KEPT_PER_NOTEBOOK setting (see config.py for why).
+RUNS_KEPT_PER_NOTEBOOK = 100
 # Time for the work around the query itself: parsing the SQL, and storing a
 # result of up to QUERY_MAX_RESULT_BYTES. A conservative allowance, not a
 # measured one.
@@ -133,11 +136,15 @@ class Executions:
         runner: Runner,
         lock_ttl_seconds: float,
         poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
+        runs_kept_per_notebook: int = RUNS_KEPT_PER_NOTEBOOK,
     ) -> None:
+        if runs_kept_per_notebook < RUNS_KEPT_PER_CELL:
+            raise ValueError("a notebook must keep at least the runs of one cell")
         self._sessions = sessions
         self._runner = runner
         self._ttl = lock_ttl_seconds
         self._poll_interval = poll_interval_seconds
+        self._runs_kept_per_notebook = runs_kept_per_notebook
         # Executions started by this process, by execution ID. Holding the
         # tasks here also keeps them alive: asyncio only keeps weak references.
         self._tasks: dict[uuid.UUID, asyncio.Task[Outcome | _Held]] = {}
@@ -298,7 +305,12 @@ class Executions:
         async with self._sessions() as session:
             # Also the existence check: if the notebook was deleted while its
             # query ran, its lock row went with it and there's nothing to store.
-            if not await lock_notebook(session, notebook_id):
+            # Exclusive, because pruning to the notebook's cap is "count, then
+            # delete": two runs storing at once each see only committed runs,
+            # so both would leave one run too many. This way they take turns.
+            # (Claiming a cell's lock takes the shared kind, which this
+            # doesn't block, so new runs still start meanwhile.)
+            if not await lock_notebook(session, notebook_id, exclusive=True):
                 return Gone()
             run = CellRun(
                 notebook_id=notebook_id,
@@ -315,6 +327,7 @@ class Executions:
             session.add(run)
             await session.flush()
             await _prune_runs(session, run)
+            await _prune_notebook_runs(session, run, self._runs_kept_per_notebook)
             # Only our own lock: if it expired and someone else took it over,
             # theirs stays. The run is stored and announced either way.
             await session.execute(
@@ -442,3 +455,46 @@ async def _prune_runs(session: AsyncSession, new_run: CellRun) -> None:
         .limit(RUNS_KEPT_PER_CELL - 1)
     )
     await session.execute(delete(CellRun).where(*same_cell, CellRun.id.not_in(keep_others)))
+
+
+async def _prune_notebook_runs(session: AsyncSession, new_run: CellRun, kept: int) -> None:
+    """Keep `new_run` plus at most `kept - 1` other runs of its notebook.
+
+    Cell IDs come from the document, which any editor can write, so without
+    this an editor could store runs for any number of made-up cells. What
+    stays, in order of preference: the other runs of `new_run`'s own cell,
+    then each cell's latest run (newest cells first), then older runs
+    (newest first). So the oldest runs of other cells go first, and a cell
+    nobody has re-run in a while keeps its result longer than the second and
+    third runs of busy cells. The new run itself is never deleted.
+
+    The caller holds the notebook's row exclusively, so no other store in
+    this notebook commits between counting and deleting.
+    """
+    others = (CellRun.notebook_id == new_run.notebook_id, CellRun.id != new_run.id)
+    ranked = (
+        select(
+            CellRun.id,
+            CellRun.cell_id,
+            CellRun.created_at,
+            func.row_number()
+            .over(
+                partition_by=CellRun.cell_id,
+                order_by=(CellRun.created_at.desc(), CellRun.id.desc()),
+            )
+            .label("newest_first"),
+        )
+        .where(*others)
+        .subquery()
+    )
+    keep = (
+        select(ranked.c.id)
+        .order_by(
+            (ranked.c.cell_id == new_run.cell_id).desc(),
+            (ranked.c.newest_first == 1).desc(),
+            ranked.c.created_at.desc(),
+            ranked.c.id.desc(),
+        )
+        .limit(kept - 1)
+    )
+    await session.execute(delete(CellRun).where(*others, CellRun.id.not_in(keep)))

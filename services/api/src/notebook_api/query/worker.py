@@ -30,11 +30,13 @@ import duckdb
 
 from notebook_api.query.engine import (
     EngineLimits,
+    QueryResult,
     QueryTimeoutError,
     execute,
     explain,
     open_connection,
 )
+from notebook_api.query.paths import PathScrubber, private_paths
 from notebook_api.query.validate import PreparedQuery
 
 _OUT_OF_MEMORY = "The query needed more memory than a worker is allowed."
@@ -66,6 +68,23 @@ def cap_process_memory(cap_mb: int) -> bool:
     return True
 
 
+def scrubbed_result(result: QueryResult, scrubber: PathScrubber) -> QueryResult:
+    """The result with server paths removed from column names and values.
+
+    A backstop behind the validator's list of functions that return paths:
+    if some other DuckDB function hands one back verbatim, it still doesn't
+    reach the notebook.
+    """
+    return {
+        **result,
+        "columns": [
+            {"name": scrubber.text(column["name"]), "type": column["type"]}
+            for column in result["columns"]
+        ],
+        "rows": [[scrubber.value(value) for value in row] for row in result["rows"]],
+    }
+
+
 def worker_main(conn: Connection) -> None:
     # Ctrl-C in the terminal goes to the whole process group. The parent owns
     # shutdown, so workers ignore SIGINT instead of dying mid-reply.
@@ -77,7 +96,10 @@ def worker_main(conn: Connection) -> None:
     try:
         limits = EngineLimits(**config["limits"])
         cap_process_memory(limits.process_memory_cap_mb)
-        con = open_connection(Path(config["db_path"]), Path(config["spill_dir"]), limits)
+        db_path, spill_dir = Path(config["db_path"]), Path(config["spill_dir"])
+        # Every worker's spill directory sits directly in the spill root.
+        scrubber = PathScrubber([*private_paths(db_path, spill_dir.parent), spill_dir])
+        con = open_connection(db_path, spill_dir, limits)
     except Exception as error:  # report any startup failure to the parent
         _send(conn, {"ready": False, "message": str(error)})
         return
@@ -99,7 +121,7 @@ def worker_main(conn: Connection) -> None:
                 explain(con, query, limits)
                 result = None
             else:
-                result = execute(con, query, limits)
+                result = scrubbed_result(execute(con, query, limits), scrubber)
         except QueryTimeoutError as error:
             _send(conn, {"id": request_id, "ok": False, "kind": "timeout", "message": str(error)})
         except duckdb.OutOfMemoryException:
@@ -107,7 +129,9 @@ def worker_main(conn: Connection) -> None:
         except MemoryError:  # hit the process cap while building the result
             _send(conn, {"id": request_id, "ok": False, "kind": "error", "message": _OUT_OF_MEMORY})
         except duckdb.Error as error:
-            _send(conn, {"id": request_id, "ok": False, "kind": "error", "message": str(error)})
+            # DuckDB's messages can name the database file or a spill file.
+            message = scrubber.text(str(error))
+            _send(conn, {"id": request_id, "ok": False, "kind": "error", "message": message})
         else:
             _send(conn, {"id": request_id, "ok": True, "result": result})
 

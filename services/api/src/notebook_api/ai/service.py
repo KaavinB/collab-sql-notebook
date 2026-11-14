@@ -15,7 +15,9 @@ A request (generate, fix or explain) for a cell:
    transaction would hold a pooled connection the whole time.
 3. In one transaction, completes the `ai_requests` row (attempts, tokens,
    latency, outcome) and either stores the suggestion (NOTIFY
-   `ai_suggestion`) or records the failure (NOTIFY `ai_failed`).
+   `ai_suggestion`) or records the failure (NOTIFY `ai_failed`). The same
+   transaction deletes the notebook's oldest finished requests past its
+   cap (`prune_ai_rows`).
 
 The work runs in its own asyncio task, not in the HTTP request, so a person
 who closes the page doesn't cancel it: everyone else still sees the
@@ -40,7 +42,7 @@ from datetime import timedelta
 from functools import partial
 from typing import Any, Literal, Protocol
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from notebook_api import events
@@ -84,6 +86,9 @@ RATE_LIMIT_WINDOW_SECONDS = 300.0
 # cell IDs) at the same moment. Two leaves room to ask about a second cell
 # while the first is still being answered. In-memory, per process (as above).
 MAX_IN_FLIGHT_PER_USER = 2
+# Finished requests kept per notebook: the default of the
+# AI_REQUESTS_KEPT_PER_NOTEBOOK setting (see config.py for why).
+REQUESTS_KEPT_PER_NOTEBOOK = 500
 
 TOO_SLOW = "The AI assistant took too long to answer. Try again."
 CELL_BUSY = "The AI assistant is already working on this cell."
@@ -202,10 +207,14 @@ class AiService:
         logged_settings: dict[str, Any] | None = None,
         deadline_seconds: float = REQUEST_DEADLINE_SECONDS,
         stale_after_seconds: float = STALE_AFTER_SECONDS,
+        requests_kept_per_notebook: int = REQUESTS_KEPT_PER_NOTEBOOK,
     ) -> None:
         """`max_concurrent`: requests this process runs at once (AI_MAX_CONCURRENT).
         `logged_settings`: the model settings (effort, fallbacks) stored with
-        each request's prompt in the log."""
+        each request's prompt in the log. `requests_kept_per_notebook`:
+        finished requests kept in a notebook's log (see prune_ai_rows)."""
+        if requests_kept_per_notebook < 1:
+            raise ValueError("requests_kept_per_notebook must be at least 1")
         self._sessions = sessions
         self.client = client
         self._model_name = model_name
@@ -217,6 +226,7 @@ class AiService:
         self._logged_settings = dict(logged_settings or {})
         self._deadline = deadline_seconds
         self._stale_after = stale_after_seconds
+        self._requests_kept = requests_kept_per_notebook
         # Requests in flight. Holding the tasks also keeps them alive:
         # asyncio only keeps weak references to tasks.
         self._tasks: set[asyncio.Task[Outcome]] = set()
@@ -442,7 +452,10 @@ class AiService:
         if isinstance(result, GenerationResult) and not succeeded(task.kind, result):
             result = Failed(result.explanation)
         async with self._sessions() as session:
-            if not await lock_notebook(session, notebook_id):
+            # Exclusive: pruning the log to its cap is "count, then delete",
+            # so two requests finishing at once in a notebook take turns
+            # instead of each leaving a row too many.
+            if not await lock_notebook(session, notebook_id, exclusive=True):
                 return Gone()  # deleted meanwhile; its AI rows went with it
             row = await session.scalar(
                 select(AiRequest).where(AiRequest.id == request_id).with_for_update()
@@ -460,6 +473,8 @@ class AiService:
             if isinstance(result, Failed):
                 row.status = "failed"
                 row.error = result.message
+                await session.flush()
+                await prune_ai_rows(session, notebook_id, request_id, self._requests_kept)
                 await events.notify(
                     session, events.ai_failed(notebook_id, cell_id, request_id, result.message)
                 )
@@ -479,6 +494,7 @@ class AiService:
             )
             session.add(suggestion)
             await session.flush()
+            await prune_ai_rows(session, notebook_id, request_id, self._requests_kept)
             await events.notify(
                 session, events.ai_suggestion(notebook_id, cell_id, request_id, suggestion.id)
             )
@@ -507,6 +523,44 @@ class AiService:
             # Nothing more can be done here; the stale-request rule and the
             # sync server's two-minute bound clean up after it.
             logger.exception("could not mark AI request %s failed", request_id)
+
+
+async def prune_ai_rows(
+    session: AsyncSession, notebook_id: uuid.UUID, current_request_id: uuid.UUID, kept: int
+) -> None:
+    """Keep the notebook's `kept` newest finished requests; delete older ones.
+
+    Cell IDs come from the document, which any editor can write, so without
+    a bound the log (and the suggestions in it) would grow with every request
+    on any made-up cell. A deleted request takes its suggestion with it (the
+    foreign key cascades). Never deleted: a request still running, one whose
+    suggestion is still waiting for a decision (people may yet accept it),
+    and `current_request_id`, the request being finished. The first two
+    don't count toward `kept`, so the log holds at most `kept` finished
+    requests plus the ones still in play.
+
+    The caller holds the notebook's row exclusively, so two requests
+    finishing at once don't both count before either deletes.
+    """
+    awaiting_decision = exists().where(
+        AiSuggestion.request_id == AiRequest.id, AiSuggestion.status == "pending"
+    )
+    finished = (
+        AiRequest.notebook_id == notebook_id,
+        AiRequest.status != "running",
+        ~awaiting_decision,
+    )
+    newest = (
+        select(AiRequest.id)
+        .where(*finished)
+        .order_by(AiRequest.created_at.desc(), AiRequest.id.desc())
+        .limit(kept)
+    )
+    await session.execute(
+        delete(AiRequest).where(
+            *finished, AiRequest.id != current_request_id, AiRequest.id.not_in(newest)
+        )
+    )
 
 
 def succeeded(kind: Kind, result: GenerationResult) -> bool:

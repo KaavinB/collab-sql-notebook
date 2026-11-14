@@ -414,7 +414,7 @@ async def _run(args: argparse.Namespace, data_dir: Path, deps: Dependencies) -> 
     }
     try:
         if "bird" in suites:
-            prepared["bird"] = _prepare_bird(args, data_dir, deps, config, source)
+            prepared["bird"] = _prepare_bird(args, data_dir, deps, config, closers, source)
         if "taxi" in suites:
             prepared["taxi"] = _prepare_taxi(args, deps, config, closers, source)
             await _read_taxi_schema(prepared["taxi"], config)
@@ -484,6 +484,7 @@ def _prepare_bird(
     data_dir: Path,
     deps: Dependencies,
     config: dict[str, Any],
+    closers: list[Callable[[], object]],
     source: dict[str, Any] | None,
 ) -> _Suite:
     dataset = ensure_dev_set(data_dir / "bird", deps.archive, deps.fetch)
@@ -517,9 +518,16 @@ def _prepare_bird(
             selection += f", then a stratified pilot of {args.limit}"
     config["bird_archive_sha256"] = dataset.archive_sha256
     config["ids"]["bird"] = [str(q.question_id) for q in subset]
+    target = BirdTarget(
+        dataset,
+        timeout_seconds=args.query_timeout,
+        row_cap=args.row_cap,
+        processes=args.concurrency,
+    )
+    closers.append(target.close)  # its query processes
     return _Suite(
         questions=[bird_eval_question(q) for q in subset],
-        target=BirdTarget(dataset, timeout_seconds=args.query_timeout, row_cap=args.row_cap),
+        target=target,
         selection=selection + ".",
     )
 

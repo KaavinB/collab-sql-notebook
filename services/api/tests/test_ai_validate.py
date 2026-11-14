@@ -38,8 +38,10 @@ LIMITS = EngineLimits(
 )
 # Takes many seconds to run (a triple cross join), but plans instantly.
 SLOW_TO_RUN = "SELECT sum(a.i * b.i) FROM nums a, nums b, nums c"
-# Slow to plan: the optimizer folds the constant expression, hashing 30 MB.
-SLOW_TO_PLAN = "SELECT md5(repeat('x', 30000000))"
+# Slow to plan: the optimizer folds the constant expression while planning,
+# building and hashing six 100 MB strings one after another (one at a time
+# stays well under the 1024 MB memory cap the workers get on Linux).
+SLOW_TO_PLAN = "SELECT " + " || ".join(f"md5(repeat('{c}', 100000000))" for c in "uvwxyz")
 
 
 def write_ai_test_db(path: Path) -> Path:

@@ -18,21 +18,17 @@ import re
 import shutil
 import tempfile
 import threading
-import time
 import tomllib
-from collections.abc import Hashable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-import duckdb
-
 from notebook_api.ai.pipeline import SchemaContext, Validator
 from notebook_api.evals.bird import DIFFICULTIES
-from notebook_api.evals.execution import ExecOutcome, short_error
+from notebook_api.evals.execution import ExecOutcome
 from notebook_api.evals.runner import EvalQuestion
-from notebook_api.query.engine import EngineLimits, open_connection
-from notebook_api.query.validate import MAX_SQL_CHARS, QueryRejectedError, prepare_query
+from notebook_api.evals.sandbox import SandboxPool, SpillRoot, duckdb_job
+from notebook_api.query.validate import MAX_SQL_CHARS
 
 NOT_MEASURED = "taxi: not measured yet (no questions in services/api/evals/taxi_questions.toml)"
 TAXI_DATABASE = "taxi"
@@ -45,7 +41,8 @@ MAX_NOTES_CHARS = 2_000
 MAX_QUESTIONS = 1_000
 MAX_WRITTEN_BY_CHARS = 200
 _MAX_FILE_BYTES = 2 * 1024 * 1024
-_FETCH_BATCH_ROWS = 1_000
+# DuckDB's own memory limit for each eval query.
+_MEMORY_LIMIT_MB = 1024
 
 
 class TaxiQuestionsError(Exception):
@@ -172,85 +169,48 @@ def scored_questions(questions: list[TaxiQuestion]) -> list[TaxiQuestion]:
     return [question for question in questions if not question.example]
 
 
-def _hashable(value: object) -> Hashable:
-    # DuckDB returns lists for LIST columns and dicts for STRUCT/MAP ones;
-    # sets need hashable rows.
-    if isinstance(value, (list, tuple)):
-        return tuple(_hashable(item) for item in value)
-    if isinstance(value, dict):
-        return tuple(sorted((str(key), _hashable(item)) for key, item in value.items()))
-    return value
-
-
 class DuckDbExecutor:
     """Runs gold and predicted SQL on taxi.duckdb, locked down like the notebook.
 
-    It runs in the eval's own process (not the API's worker pool, which
-    would need the API running): the database file is read-only, external
-    access is off and settings are locked exactly as in the query engine,
-    and every query goes through `prepare_query` first. The OS memory cap
-    the API's workers add on Linux isn't applied here.
-    Queries run one at a time (a lock), which is plenty for ~50 questions.
+    Not the API's worker pool (that would need the API running), but the
+    same protections: every query runs in a killable child process with a
+    scrubbed environment and, on Linux, a memory cap (see evals/sandbox.py),
+    on a connection of its own with the query engine's lockdown
+    (read-only file, external access off, settings locked), after the same
+    SQL checks (`prepare_query`). A query that ignores DuckDB's interrupt,
+    such as one whose constant folding is expensive, is killed rather than
+    holding up the run.
+    Queries run one at a time (a lock), which is plenty for ~50 questions
+    and keeps to one DuckDB memory limit's worth of memory.
     """
 
     def __init__(self, db_path: Path, *, timeout_seconds: float, row_cap: int) -> None:
-        self._spill_dir = Path(tempfile.mkdtemp(prefix="eval-duckdb-spill-"))
-        self._limits = EngineLimits(
-            memory_limit_mb=1024,
-            process_memory_cap_mb=2048,  # not enforced in-process; required by the type
-            threads=2,
-            max_spill_size_mb=2048,
-            timeout_seconds=timeout_seconds,
-            row_limit=row_cap,
-            max_result_bytes=0,  # unused here: rows are compared, not sent anywhere
-        )
-        self._con = open_connection(db_path, self._spill_dir, self._limits)
+        self._db_path = db_path
+        self._timeout_seconds = timeout_seconds
+        self._row_cap = row_cap
+        self._spill = SpillRoot()
+        self._processes = SandboxPool(max_idle=1)
         self._lock = threading.Lock()
 
     def close(self) -> None:
-        self._con.close()
-        shutil.rmtree(self._spill_dir, ignore_errors=True)
+        self._processes.close()
+        self._spill.close()
 
     def execute(self, sql: str) -> ExecOutcome:
-        started = time.perf_counter()
-
-        def elapsed() -> float:
-            return round((time.perf_counter() - started) * 1000, 3)
-
-        try:
-            prepared = prepare_query(sql, self._limits.row_limit)
-        except QueryRejectedError as error:
-            return ExecOutcome("error", error=short_error(error), duration_ms=elapsed())
         with self._lock:
-            cursor = self._con.cursor()
-            timer = threading.Timer(self._limits.timeout_seconds, cursor.interrupt)
-            timer.start()
-            rows: set[tuple[Hashable, ...]] = set()
-            count = 0
+            spill_dir = self._spill.query_dir()
             try:
-                cursor.execute(prepared.sql)
-                while batch := cursor.fetchmany(_FETCH_BATCH_ROWS):
-                    count += len(batch)
-                    if count > self._limits.row_limit:
-                        return ExecOutcome(
-                            "too_many_rows",
-                            row_count=count,
-                            error=f"more than {self._limits.row_limit} rows",
-                            duration_ms=elapsed(),
-                        )
-                    rows.update(tuple(_hashable(value) for value in row) for row in batch)
-            except duckdb.InterruptException:
-                return ExecOutcome(
-                    "timeout",
-                    error=f"stopped after {self._limits.timeout_seconds:g} seconds",
-                    duration_ms=elapsed(),
+                job = duckdb_job(
+                    self._db_path,
+                    sql,
+                    spill_dir=spill_dir,
+                    timeout_seconds=self._timeout_seconds,
+                    row_cap=self._row_cap,
+                    memory_limit_mb=_MEMORY_LIMIT_MB,
                 )
-            except duckdb.Error as error:
-                return ExecOutcome("error", error=short_error(error), duration_ms=elapsed())
+                return self._processes.run(job, timeout_seconds=self._timeout_seconds)
             finally:
-                timer.cancel()
-                cursor.close()
-        return ExecOutcome("ok", rows=frozenset(rows), row_count=count, duration_ms=elapsed())
+                shutil.rmtree(spill_dir, ignore_errors=True)
 
 
 def check_gold_sql(questions: list[TaxiQuestion], executor: DuckDbExecutor) -> None:
