@@ -280,11 +280,22 @@ def test_the_shipped_file_names_who_wrote_it() -> None:
 
 # The real dataset, when it has been built (`pnpm ingest`); not every
 # checkout has it, so this test skips without it.
-REAL_TAXI_DB = Path(__file__).resolve().parents[4] / "data" / "taxi.duckdb"
+# The test file may sit at a different depth (e.g. mounted alone in a
+# container), so look upward for it rather than counting parents.
+def _real_taxi_db() -> Path | None:
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "data" / "taxi.duckdb"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
-@pytest.mark.skipif(not REAL_TAXI_DB.is_file(), reason="data/taxi.duckdb not built")
+REAL_TAXI_DB = _real_taxi_db()
+
+
+@pytest.mark.skipif(REAL_TAXI_DB is None, reason="data/taxi.duckdb not built")
 def test_every_shipped_gold_query_runs_on_the_real_data() -> None:
+    assert REAL_TAXI_DB is not None
     questions = load_taxi_questions(DEFAULT_TAXI_QUESTIONS)
     real = DuckDbExecutor(REAL_TAXI_DB, timeout_seconds=60, row_cap=1_000_000)
     try:
