@@ -17,6 +17,8 @@
     "check": "pnpm lint && pnpm typecheck && pnpm test",
     "ingest": "uv run --directory services/api notebook-ingest --data-dir ../../data",
     "eval": "uv run --directory services/api --env-file ../../.env python -m notebook_api.evals --data-dir ../../data",
+    "bench:latency": "node --env-file=.env apps/bench/src/latency.ts",
+    "bench:load": "node --env-file=.env apps/bench/src/load.ts",
     "db:migrate": "uv run --directory services/api --env-file ../../.env alembic upgrade head",
     "db:revision": "uv run --directory services/api --env-file ../../.env alembic revision --autogenerate -m",
     "test:api": "uv run --directory services/api --env-file ../../.env pytest -q",

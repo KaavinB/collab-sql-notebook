@@ -46,3 +46,6 @@ next-env.d.ts
 
 # e2e build output (playwright.config.ts)
 /.next-e2e/
+
+# benchmark build output (apps/bench)
+/.next-bench/
