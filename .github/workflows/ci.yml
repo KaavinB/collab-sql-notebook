@@ -1,0 +1,223 @@
+# Continuous integration: the same checks a developer runs locally.
+#
+#   check  `pnpm check`: lint, typecheck and unit/integration tests for every
+#          app, plus the API's pytest suite. On this Linux runner that suite
+#          also runs the Linux-only tests (the query workers' RLIMIT_DATA
+#          memory cap and their scrubbed /proc environment), which a Mac skips.
+#   e2e    The Playwright tests against the real stack (API, sync server and a
+#          production build of the web app) and the real taxi dataset.
+#
+# No secrets: the tests use fake model clients and a dev-only sign-in, and the
+# Postgres password below only protects a throwaway service container.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Read-only token: nothing here writes to the repository, issues or packages.
+# (Caches and artifacts use the runner's own token, not this one.)
+permissions:
+  contents: read
+
+# A newer push to a pull request cancels its older run. Each push to main
+# gets its own group (keyed on the commit), so no run on main is cancelled or
+# replaced while queued, and every commit on main gets a CI result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Python version for uv. Must match services/api/.python-version (which
+  # local runs use); naming it here keeps CI from moving to a newer Python on
+  # its own when one is released.
+  PYTHON_VERSION: "3.14"
+  # Every `uv run` (pnpm scripts, the sync tests' migration step) must use
+  # uv.lock exactly and fail if it no longer matches pyproject.toml, instead
+  # of quietly re-locking.
+  UV_LOCKED: "1"
+  # The uv version scripts/test-api-linux.sh pins.
+  UV_VERSION: "0.13.0"
+  # Throwaway credentials for the Postgres service container (not a secret).
+  POSTGRES_USER: notebook
+  POSTGRES_PASSWORD: ci-only-throwaway-password
+  POSTGRES_DB: notebook
+
+jobs:
+  check:
+    name: Lint, typecheck, unit and integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        # The same major version as docker-compose.yml, pinned by digest.
+        image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        # Service containers can't read the workflow's env, so the same
+        # values are repeated here.
+        env:
+          POSTGRES_USER: notebook
+          POSTGRES_PASSWORD: ci-only-throwaway-password
+          POSTGRES_DB: notebook
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U notebook -d notebook"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # pnpm first, so setup-node can cache its store. The version comes from
+      # package.json's packageManager field.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      # .nvmrc ("26") rather than package.json's engines (">=26"): a range
+      # would move CI to the next major version as soon as it ships.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: services/api/uv.lock
+
+      - name: Write .env for the test scripts
+        # The root scripts load the repo-root .env (`uv run --env-file`, the
+        # sync tests' global setup), so CI needs one. The API's pytest suite
+        # uses <db>_test and the sync tests <db>_sync_test, both created and
+        # migrated by the test fixtures.
+        run: |
+          cat > .env <<EOF
+          POSTGRES_USER=${POSTGRES_USER}
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          POSTGRES_DB=${POSTGRES_DB}
+          DATABASE_URL=postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}
+          EOF
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Python dependencies
+        run: uv sync --locked --directory services/api
+
+      - name: pnpm check
+        run: pnpm check
+
+  e2e:
+    name: End-to-end tests (Playwright)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        # Service containers can't read the workflow's env, so the same
+        # values are repeated here.
+        env:
+          POSTGRES_USER: notebook
+          POSTGRES_PASSWORD: ci-only-throwaway-password
+          POSTGRES_DB: notebook
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U notebook -d notebook"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: services/api/uv.lock
+
+      - name: Write .env for the e2e servers
+        # playwright.config.ts sets every test-specific value (ports, secrets,
+        # dev sign-in, the fake AI model); the servers still read the database
+        # and the DuckDB file from here. DUCKDB_PATH is relative to
+        # services/api, where `pnpm dev:api` runs.
+        run: |
+          cat > .env <<EOF
+          POSTGRES_USER=${POSTGRES_USER}
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          POSTGRES_DB=${POSTGRES_DB}
+          DATABASE_URL=postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}
+          DUCKDB_PATH=../../data/taxi.duckdb
+          EOF
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Python dependencies
+        run: uv sync --locked --directory services/api
+
+      # The e2e tests query the real taxi data (exact row counts for January
+      # 2024, and a cross join big enough to hit the query timeout), so a
+      # small synthetic database can't stand in for it. The downloaded TLC
+      # files (160,401,536 bytes per the pinned manifest) are cached, keyed on the manifest that pins their
+      # SHA-256 checksums: a new month or a changed checksum is a new key.
+      # taxi.duckdb itself is rebuilt on every run from those files, so it's
+      # always built by the DuckDB version in uv.lock. The ingest re-verifies
+      # every cached file against its pinned checksum before using it and
+      # replaces one that doesn't match with a fresh, verified download, so a
+      # bad cache entry never reaches the tests.
+      - name: Restore the taxi dataset downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: data/raw
+          key: taxi-raw-${{ hashFiles('services/api/src/notebook_api/dataset/manifest.py') }}
+
+      - name: Build taxi.duckdb (pnpm ingest)
+        run: pnpm ingest
+
+      - name: Migrate the database
+        run: pnpm db:migrate
+
+      - name: Restore Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          # The browser build is tied to the Playwright version in the lockfile.
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm --filter web exec playwright install --with-deps chromium
+
+      - name: Install Chromium's system libraries
+        # Cached browsers still need the OS packages, which aren't cached.
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm --filter web exec playwright install-deps chromium
+
+      - name: pnpm e2e
+        run: pnpm e2e
+
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-traces
+          path: apps/web/test-results/
+          retention-days: 7
+          if-no-files-found: ignore

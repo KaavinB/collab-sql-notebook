@@ -32,6 +32,8 @@ process.env.E2E_WEB_URL = WEB_URL;
 
 export default defineConfig({
   testDir: "e2e",
+  // A stray test.only must fail CI rather than silently skip every other test.
+  forbidOnly: !!process.env.CI,
   timeout: 60_000,
   fullyParallel: false,
   workers: 1,

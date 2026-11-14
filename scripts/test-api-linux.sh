@@ -61,6 +61,6 @@ print(f\"postgresql+psycopg://{user}:{password}@postgres:5432/{database}\")
     tar --exclude=.venv --exclude=.pytest_cache --exclude=.mypy_cache \
         --exclude=.ruff_cache --exclude=__pycache__ -cf - . | tar -xf - -C /app
     cd /app
-    uv sync --quiet --frozen
+    uv sync --quiet --locked
     uv run pytest -q -rs "$@"
   ' sh "$@"
