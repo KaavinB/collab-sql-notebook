@@ -153,10 +153,9 @@ def explain(con: duckdb.DuckDBPyConnection, query: PreparedQuery, limits: Engine
     The plan is asked for as JSON, not the default text drawing: the plan is
     thrown away anyway, and drawing it can be far slower than planning when
     the optimizer has folded a constant expression into a huge value
-    (`SELECT length(repeat('x', 300000000))`: the Phase 4 review measured
-    3.52 s as JSON and 65.62 s as text, one run each on one machine;
-    tests/test_query_engine.py checks a smaller case fits a limit only the
-    JSON plan meets).
+    (e.g. `SELECT length(repeat('x', 300000000))`;
+    tests/test_query_engine.py checks a smaller case fits a time limit only
+    the JSON plan meets).
 
     Same safety as execute(): a fresh cursor, closed afterwards, and the same
     timeout. Planning itself can still be slow on purpose, because the

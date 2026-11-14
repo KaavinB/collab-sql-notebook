@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     # Where workers spill big sorts and joins. Defaults to <duckdb dir>/spill.
     # Only `worker-*` subdirectories in it are ever created or deleted.
     query_spill_dir: Path | None = None
-    # The limits below are starting values, not tuned yet. Phase 4's load test
-    # measures them; until then they're deliberately conservative.
+    # The limits below are starting values, not tuned against measurements;
+    # they're deliberately conservative.
     query_workers: int = Field(default=2, ge=1, le=32)
     query_threads_per_worker: int = Field(default=2, ge=1, le=16)
     # DuckDB's own memory_limit, per worker. It governs DuckDB's buffer
