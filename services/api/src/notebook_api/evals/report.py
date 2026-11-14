@@ -347,6 +347,18 @@ def _render_model_detail(model: str, s: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _taxi_method(run: dict[str, Any]) -> list[str]:
+    if "taxi" not in run.get("suites", []):
+        return []
+    return [
+        "- **Taxi questions** spell out what to return: the columns, rounding, how to treat "
+        "NULLs and bad rows, and tie-breaks. Exact matching needs that, or a correct but "
+        "differently shaped answer would be scored wrong. So the taxi score measures turning "
+        "a precise request into SQL more than interpreting a vague one, and it isn't "
+        "comparable with the BIRD score. The suite section above says who wrote the questions."
+    ]
+
+
 def _render_method(run: dict[str, Any]) -> list[str]:
     prices = ", ".join(
         f"`{model}` ${p.base.input_per_mtok:g} / ${p.base.output_per_mtok:g}"
@@ -381,7 +393,10 @@ def _render_method(run: dict[str, Any]) -> list[str]:
         f"this run used {run['query_timeout_seconds']:g} s, and a {run['row_cap']:,}-row cap. "
         "(4) BIRD's per-question evidence hints are included in the prompt, so scores compare "
         "with BIRD's with-evidence setting only. (5) The schema is shown in this harness's own "
-        "format (CREATE TABLE text with a few sample values per column), not BIRD's.",
+        "format (CREATE TABLE text with a few sample values per column), not BIRD's. (6) "
+        "Numbers are compared by value, whatever their type (a DECIMAL 15.74 equals a DOUBLE "
+        "15.74); BIRD's SQLite databases have no DECIMAL, so this changes nothing there.",
+        *_taxi_method(run),
         "- **Unfinished questions** (a service failure before any answer) are left out of "
         "every rate and listed; a refusal is an answer, scored wrong.",
         "- **Valid SQL**: the attempt parsed as one SELECT and passed EXPLAIN on the database.",

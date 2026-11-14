@@ -1,4 +1,5 @@
 from collections.abc import Hashable
+from decimal import Decimal
 
 import pytest
 
@@ -24,6 +25,19 @@ def test_different_rows_or_extra_rows_are_wrong() -> None:
 def test_int_and_float_compare_like_python_sets_do() -> None:
     # BIRD compares Python sets, where 1 == 1.0.
     assert is_correct(ok((1,)), ok((1.0,)))
+
+
+def test_decimal_and_double_with_the_same_value_are_equal() -> None:
+    # DuckDB returns DECIMAL for e.g. round(x::numeric, 2); gold rounds a DOUBLE.
+    assert is_correct(ok((Decimal("97162377.26"),)), ok((97162377.26,)))
+    assert is_correct(
+        ok(("2024-01", Decimal("15.74")), ("2024-02", Decimal("16.1"))),
+        ok(("2024-01", 15.74), ("2024-02", 16.1)),
+    )
+    assert is_correct(ok(((Decimal("1.5"), 2),)), ok(((1.5, 2),)))  # inside lists too
+    # Still by value: a different number is wrong whatever its type.
+    assert not is_correct(ok((Decimal("15.75"),)), ok((15.74,)))
+    assert not is_correct(ok((Decimal("15.74"), 1)), ok((15.74,)))  # an extra column
 
 
 def test_failed_predictions_and_failed_gold_are_never_correct() -> None:

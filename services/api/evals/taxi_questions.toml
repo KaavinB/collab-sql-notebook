@@ -21,6 +21,11 @@
 #   example    optional, default false. true marks a format example: it is
 #              validated like the others but never scored.
 #
+# Top-level key (before the first [[questions]]):
+#   written_by optional. Who wrote the questions and gold SQL; the report
+#              shows it, since a model scored on its own questions isn't
+#              measured independently.
+#
 # Tables: trips (one row per yellow-taxi trip: pickup_at, dropoff_at,
 # passenger_count, trip_distance, pickup_location_id, dropoff_location_id,
 # payment_type, fare_amount, tip_amount, total_amount, ...) and zones
@@ -31,6 +36,8 @@
 #
 # Until this file has questions other than the two examples, the eval
 # report says the taxi score is not measured yet.
+
+written_by = "Codex (an OpenAI model), prompted by the project owner; not written by Claude"
 
 # --- EXAMPLE (never scored) -------------------------------------------------
 [[questions]]
@@ -61,3 +68,808 @@ difficulty = "moderate"
 notes = "Format example only. payment_type 1 is a credit card in the TLC data dictionary."
 
 # --- Your questions go below this line --------------------------------------
+
+# --- Simple (20) -----------------------------------------------------------
+
+[[questions]]
+id = "total-trip-count"
+question = "How many trip records are in the database? Return just the count."
+gold_sql = """
+SELECT count(*) AS trip_count FROM trips
+"""
+difficulty = "simple"
+
+[[questions]]
+id = "february-pickup-count"
+question = "How many trips were picked up in February 2024? Return just the count, using pickup_at to determine the month."
+gold_sql = """
+SELECT count(*) AS trip_count
+FROM trips
+WHERE pickup_at >= TIMESTAMP '2024-02-01'
+  AND pickup_at < TIMESTAMP '2024-03-01'
+"""
+difficulty = "simple"
+notes = "February includes leap day; the upper boundary is exclusive."
+
+[[questions]]
+id = "march-net-total-amount"
+question = "What is the sum of total_amount for trips picked up in March 2024, including negative and zero amounts? Return that one dollar amount rounded to 2 decimal places."
+gold_sql = """
+SELECT round(sum(total_amount), 2) AS net_total_amount
+FROM trips
+WHERE pickup_at >= TIMESTAMP '2024-03-01'
+  AND pickup_at < TIMESTAMP '2024-04-01'
+"""
+difficulty = "simple"
+
+[[questions]]
+id = "mean-positive-distance"
+question = "Among all trips with trip_distance greater than zero, what is the average trip_distance in miles, rounded to 2 decimal places? Apply no other filters."
+gold_sql = """
+SELECT round(avg(trip_distance), 2) AS mean_miles
+FROM trips
+WHERE trip_distance > 0
+"""
+difficulty = "simple"
+notes = "Includes large distance outliers; only zero and negative distances are excluded."
+
+[[questions]]
+id = "pickup-date-coverage"
+question = "Return the earliest and latest pickup calendar dates in the database, as two DATE values in that order."
+gold_sql = """
+SELECT cast(min(pickup_at) AS DATE) AS first_pickup_date,
+       cast(max(pickup_at) AS DATE) AS last_pickup_date
+FROM trips
+"""
+difficulty = "simple"
+
+[[questions]]
+id = "payment-code-counts"
+question = "Show every payment_type code present in trips and the number of trips with that code. Include code 0 and return just the code and count."
+gold_sql = """
+SELECT payment_type, count(*) AS trip_count
+FROM trips
+GROUP BY payment_type
+"""
+difficulty = "simple"
+notes = "Code 0 is present and must not be silently discarded or relabeled as NULL."
+
+[[questions]]
+id = "vendor-trip-counts"
+question = "List each vendor_id present in trips and its trip count. Return the numeric vendor ID and count, without translating IDs to names."
+gold_sql = """
+SELECT vendor_id, count(*) AS trip_count
+FROM trips
+GROUP BY vendor_id
+"""
+difficulty = "simple"
+notes = "Observed vendor IDs are 1, 2, and 6; no vendor-name dictionary knowledge is required."
+
+[[questions]]
+id = "rate-code-counts-including-null"
+question = "How many trips have each rate_code_id? Return the code and count, keeping SQL NULL as its own group and keeping code 99 separate from NULL."
+gold_sql = """
+SELECT rate_code_id, count(*) AS trip_count
+FROM trips
+GROUP BY rate_code_id
+"""
+difficulty = "simple"
+notes = "The data contains both SQL NULL and the literal rate code 99."
+
+[[questions]]
+id = "missing-and-zero-passengers"
+question = "Return two counts across all trips: first the number with passenger_count IS NULL, then the number with passenger_count equal to 0."
+gold_sql = """
+SELECT count(*) FILTER (WHERE passenger_count IS NULL) AS missing_passengers,
+       count(*) FILTER (WHERE passenger_count = 0) AS zero_passengers
+FROM trips
+"""
+difficulty = "simple"
+notes = "Missing and zero passenger counts are different conditions."
+
+[[questions]]
+id = "zero-distance-positive-fares"
+question = "For trips with trip_distance = 0 and fare_amount > 0, return the trip count and the sum of fare_amount, with the sum rounded to 2 decimal places."
+gold_sql = """
+SELECT count(*) AS trip_count, round(sum(fare_amount), 2) AS fare_sum
+FROM trips
+WHERE trip_distance = 0 AND fare_amount > 0
+"""
+difficulty = "simple"
+
+[[questions]]
+id = "dropoff-before-pickup"
+question = "How many trips have dropoff_at strictly earlier than pickup_at? Return just the count; do not count equal timestamps."
+gold_sql = """
+SELECT count(*) AS trip_count
+FROM trips
+WHERE dropoff_at < pickup_at
+"""
+difficulty = "simple"
+
+[[questions]]
+id = "negative-fare-nonnegative-total"
+question = "How many trips have a negative fare_amount but a total_amount greater than or equal to zero? Return just the count."
+gold_sql = """
+SELECT count(*) AS trip_count
+FROM trips
+WHERE fare_amount < 0 AND total_amount >= 0
+"""
+difficulty = "simple"
+notes = "Negative fares do not always imply negative totals in these records."
+
+[[questions]]
+id = "special-pickup-location-counts"
+question = "For pickup_location_id 264 and 265, return each ID and its trip count as separate rows. Include all trips with either ID."
+gold_sql = """
+SELECT pickup_location_id, count(*) AS trip_count
+FROM trips
+WHERE pickup_location_id IN (264, 265)
+GROUP BY pickup_location_id
+"""
+difficulty = "simple"
+notes = "zones maps 264 to borough Unknown / zone N/A and 265 to borough N/A / zone Outside of NYC. Both IDs occur."
+
+[[questions]]
+id = "airport-pickup-counts"
+question = "How many trips started at JFK Airport (pickup_location_id 132) and LaGuardia Airport (138)? Return each pickup location ID, its zone name from zones, and its trip count."
+gold_sql = """
+SELECT z.location_id, z.zone, count(*) AS trip_count
+FROM trips t
+JOIN zones z ON t.pickup_location_id = z.location_id
+WHERE t.pickup_location_id IN (132, 138)
+GROUP BY z.location_id, z.zone
+"""
+difficulty = "simple"
+notes = "Airport pickup locations are explicit; rate codes are not used to identify origins."
+
+[[questions]]
+id = "five-busiest-pickup-zones"
+question = "Which five pickup zones have the most trips in the database? Return each zone's location_id, zone name, and trip count."
+gold_sql = """
+SELECT z.location_id, z.zone, count(*) AS trip_count
+FROM trips t
+JOIN zones z ON t.pickup_location_id = z.location_id
+GROUP BY z.location_id, z.zone
+ORDER BY trip_count DESC
+LIMIT 5
+"""
+difficulty = "simple"
+notes = "The fifth and sixth counts are 336460 and 331570, so there is no cutoff tie. Group by ID as well as name because zone names are not unique."
+
+[[questions]]
+id = "manhattan-to-brooklyn-count"
+question = "How many trips started in Manhattan and ended in Brooklyn, using the borough labels in zones for both endpoints? Return just the trip count."
+gold_sql = """
+SELECT count(*) AS trip_count
+FROM trips t
+JOIN zones p ON t.pickup_location_id = p.location_id
+JOIN zones d ON t.dropoff_location_id = d.location_id
+WHERE p.borough = 'Manhattan' AND d.borough = 'Brooklyn'
+"""
+difficulty = "simple"
+
+[[questions]]
+id = "pickup-hour-counts"
+question = "Across all dates, how many trips were picked up in each hour of day? Return the hour as an integer from 0 through 23 and its trip count, using the stored pickup_at without timezone conversion."
+gold_sql = """
+SELECT cast(extract(hour FROM pickup_at) AS INTEGER) AS pickup_hour,
+       count(*) AS trip_count
+FROM trips
+GROUP BY pickup_hour
+"""
+difficulty = "simple"
+
+[[questions]]
+id = "pickup-weekday-counts"
+question = "Across all dates, count trips by the weekday of pickup_at. Return the ISO weekday number (Monday = 1 through Sunday = 7) and its trip count."
+gold_sql = """
+SELECT cast(extract(isodow FROM pickup_at) AS INTEGER) AS iso_weekday,
+       count(*) AS trip_count
+FROM trips
+GROUP BY iso_weekday
+"""
+difficulty = "simple"
+
+[[questions]]
+id = "store-forward-flag-counts"
+question = "Return each distinct store_and_fwd_flag value and its trip count, including a separate SQL NULL group for missing flags. Keep the original flag values."
+gold_sql = """
+SELECT store_and_fwd_flag, count(*) AS trip_count
+FROM trips
+GROUP BY store_and_fwd_flag
+"""
+difficulty = "simple"
+notes = "Y and N are observed alongside NULL; NULL must not be treated as N."
+
+[[questions]]
+id = "positive-tolls-summary"
+question = "Among trips with tolls_amount greater than zero, return the number of trips and the sum of tolls_amount, rounding that sum to 2 decimal places."
+gold_sql = """
+SELECT count(*) AS trip_count, round(sum(tolls_amount), 2) AS tolls_sum
+FROM trips
+WHERE tolls_amount > 0
+"""
+difficulty = "simple"
+
+# --- Moderate (20) ---------------------------------------------------------
+
+[[questions]]
+id = "monthly-standard-rate-mean-fare"
+question = "For standard-rate trips (rate_code_id = 1) with fare_amount > 0, return each pickup month as YYYY-MM and the average fare_amount rounded to 2 decimal places."
+gold_sql = """
+SELECT strftime(pickup_at, '%Y-%m') AS pickup_month,
+       round(avg(fare_amount), 2) AS mean_fare
+FROM trips
+WHERE rate_code_id = 1 AND fare_amount > 0
+GROUP BY pickup_month
+"""
+difficulty = "moderate"
+notes = "Standard rate is explicitly identified by code 1; no other quality filters apply."
+
+[[questions]]
+id = "february-daily-pickups"
+question = "Show the trip count for every pickup calendar date in February 2024. Return the date as a DATE value and its count."
+gold_sql = """
+SELECT cast(pickup_at AS DATE) AS pickup_date, count(*) AS trip_count
+FROM trips
+WHERE pickup_at >= TIMESTAMP '2024-02-01'
+  AND pickup_at < TIMESTAMP '2024-03-01'
+GROUP BY pickup_date
+"""
+difficulty = "moderate"
+notes = "Every February calendar date has trips, including February 29."
+
+[[questions]]
+id = "weekday-weekend-median-duration"
+question = "Compare weekday and weekend trip durations across all trips, assigning the day from pickup_at. Keep only elapsed durations strictly greater than 0 and at most 120 minutes. Return the label 'weekday' (Monday-Friday) or 'weekend' (Saturday-Sunday) and the continuous median elapsed duration in minutes, rounded to 2 decimal places."
+gold_sql = """
+SELECT CASE WHEN extract(isodow FROM pickup_at) IN (6, 7)
+            THEN 'weekend' ELSE 'weekday' END AS day_type,
+       round(median(epoch(dropoff_at - pickup_at) / 60.0), 2) AS median_minutes
+FROM trips
+WHERE dropoff_at > pickup_at
+  AND dropoff_at <= pickup_at + INTERVAL '120 minutes'
+GROUP BY day_type
+"""
+difficulty = "moderate"
+notes = "Duration uses elapsed timestamp time, not just clock time; no distance or fare filter applies."
+
+[[questions]]
+id = "card-share-among-card-and-cash-by-borough"
+question = "For each pickup borough label in zones, what percentage of its trips paid by card among trips paid by card or cash? Use payment_type 1 for card and 2 for cash, exclude other payment codes from the denominator, and return just the borough and percentage on a 0-100 scale rounded to 2 decimal places."
+gold_sql = """
+SELECT z.borough,
+       round(100.0 * count(*) FILTER (WHERE t.payment_type = 1) / count(*), 2)
+         AS card_percentage
+FROM trips t
+JOIN zones z ON t.pickup_location_id = z.location_id
+WHERE t.payment_type IN (1, 2)
+GROUP BY z.borough
+"""
+difficulty = "moderate"
+notes = "Includes all observed borough labels, including EWR, Unknown, and N/A. Each has eligible trips."
+
+[[questions]]
+id = "ten-busiest-borough-routes"
+question = "What are the ten most frequent ordered pickup-borough to dropoff-borough pairs across all trips? Return the pickup borough, dropoff borough, and trip count, using all labels in zones and keeping same-borough pairs."
+gold_sql = """
+SELECT p.borough AS pickup_borough, d.borough AS dropoff_borough,
+       count(*) AS trip_count
+FROM trips t
+JOIN zones p ON t.pickup_location_id = p.location_id
+JOIN zones d ON t.dropoff_location_id = d.location_id
+GROUP BY p.borough, d.borough
+ORDER BY trip_count DESC
+LIMIT 10
+"""
+difficulty = "moderate"
+notes = "Direction matters. The tenth and eleventh counts are 24001 and 22893, so there is no cutoff tie."
+
+[[questions]]
+id = "same-zone-percentage-by-pickup-borough"
+question = "For each pickup borough label in zones, what percentage of all trips starting there have identical pickup_location_id and dropoff_location_id? Return the borough and the percentage on a 0-100 scale rounded to 2 decimal places. Include every observed borough label."
+gold_sql = """
+SELECT z.borough,
+       round(100.0 * count(*) FILTER (
+         WHERE t.pickup_location_id = t.dropoff_location_id
+       ) / count(*), 2) AS same_zone_percentage
+FROM trips t
+JOIN zones z ON t.pickup_location_id = z.location_id
+GROUP BY z.borough
+"""
+difficulty = "moderate"
+notes = "Same zone means identical location IDs, not identical zone names or boroughs."
+
+[[questions]]
+id = "median-positive-total-by-payment-code"
+question = "For each payment_type with any total_amount > 0 trips, return the payment code and the continuous median total_amount among those positive-total trips, rounded to 2 decimal places."
+gold_sql = """
+SELECT payment_type, round(median(total_amount), 2) AS median_total
+FROM trips
+WHERE total_amount > 0
+GROUP BY payment_type
+"""
+difficulty = "moderate"
+notes = "Codes are kept as recorded, including 0. Zero and negative totals are excluded."
+
+[[questions]]
+id = "borough-distance-95th-percentile"
+question = "For each pickup borough label in zones, return the continuous 95th percentile of trip_distance in miles, rounded to 2 decimal places. Use only trips with trip_distance > 0 and <= 100, and return just the borough and percentile."
+gold_sql = """
+SELECT z.borough, round(quantile_cont(t.trip_distance, 0.95), 2) AS p95_miles
+FROM trips t
+JOIN zones z ON t.pickup_location_id = z.location_id
+WHERE t.trip_distance > 0 AND t.trip_distance <= 100
+GROUP BY z.borough
+"""
+difficulty = "moderate"
+notes = "Explicit distance bounds exclude both zero distances and extreme outliers. All observed borough labels remain."
+
+[[questions]]
+id = "zones-without-march-pickups"
+question = "Which zones had no trips picked up in March 2024? Start from every row of zones and return the location_id and zone name for each zone with zero March pickups, based on pickup_at."
+gold_sql = """
+SELECT z.location_id, z.zone
+FROM zones z
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM trips t
+  WHERE t.pickup_location_id = z.location_id
+    AND t.pickup_at >= TIMESTAMP '2024-03-01'
+    AND t.pickup_at < TIMESTAMP '2024-04-01'
+)
+"""
+difficulty = "moderate"
+notes = "An anti-join must retain unused zones. IDs 103, 104, and 105 share a name but are distinct zones."
+
+[[questions]]
+id = "jfk-manhattan-hourly-mean-speed"
+question = "For trips picked up at JFK (pickup_location_id 132) and dropped off in Manhattan according to zones, show the pickup hour (integer 0-23) and arithmetic mean of per-trip speed in mph, rounded to 2 decimal places. Speed is trip_distance divided by elapsed hours. Keep only distances > 0 and <= 100 miles and durations > 0 and <= 120 minutes; apply no other filters."
+gold_sql = """
+SELECT cast(extract(hour FROM t.pickup_at) AS INTEGER) AS pickup_hour,
+       round(avg(t.trip_distance * 3600.0 / epoch(t.dropoff_at - t.pickup_at)), 2)
+         AS mean_mph
+FROM trips t
+JOIN zones d ON t.dropoff_location_id = d.location_id
+WHERE t.pickup_location_id = 132 AND d.borough = 'Manhattan'
+  AND t.trip_distance > 0 AND t.trip_distance <= 100
+  AND t.dropoff_at > t.pickup_at
+  AND t.dropoff_at <= t.pickup_at + INTERVAL '120 minutes'
+GROUP BY pickup_hour
+"""
+difficulty = "moderate"
+notes = "The arithmetic mean of individual speeds differs from total miles divided by total hours. All 24 pickup hours have eligible trips."
+
+[[questions]]
+id = "pickup-service-zone-financial-summary"
+question = "Group all trips by the service_zone of their pickup location in zones. Return the service_zone, trip count, and sum of total_amount rounded to 2 decimal places. Include negative and zero totals and every service_zone label."
+gold_sql = """
+SELECT z.service_zone, count(*) AS trip_count,
+       round(sum(t.total_amount), 2) AS total_amount_sum
+FROM trips t
+JOIN zones z ON t.pickup_location_id = z.location_id
+GROUP BY z.service_zone
+"""
+difficulty = "moderate"
+
+[[questions]]
+id = "missing-passenger-percentage-by-vendor"
+question = "For each vendor_id, what percentage of all its trips have passenger_count IS NULL? Return just the vendor ID and percentage on a 0-100 scale rounded to 2 decimal places, including vendors with zero missing passenger counts."
+gold_sql = """
+SELECT vendor_id,
+       round(100.0 * count(*) FILTER (WHERE passenger_count IS NULL) / count(*), 2)
+         AS missing_percentage
+FROM trips
+GROUP BY vendor_id
+"""
+difficulty = "moderate"
+notes = "Zero passengers is not missing. The denominator includes all trips from that vendor."
+
+[[questions]]
+id = "jfk-rate-endpoint-categories"
+question = "For trips with the JFK rate (rate_code_id = 2), count trips in four endpoint categories: 'both' if pickup_location_id and dropoff_location_id are both 132; 'pickup_only' if only pickup is 132; 'dropoff_only' if only dropoff is 132; and 'neither' if neither is 132. Return the category and trip count for categories present in the data."
+gold_sql = """
+SELECT CASE
+         WHEN pickup_location_id = 132 AND dropoff_location_id = 132 THEN 'both'
+         WHEN pickup_location_id = 132 THEN 'pickup_only'
+         WHEN dropoff_location_id = 132 THEN 'dropoff_only'
+         ELSE 'neither'
+       END AS endpoint_category,
+       count(*) AS trip_count
+FROM trips
+WHERE rate_code_id = 2
+GROUP BY endpoint_category
+"""
+difficulty = "moderate"
+notes = "A JFK rate code does not guarantee that either recorded endpoint is JFK. Category tests are mutually exclusive."
+
+[[questions]]
+id = "march-dates-most-negative-totals"
+question = "Which five pickup calendar dates in March 2024 had the most trips with total_amount < 0? Return each date as a DATE value and its count of negative-total trips."
+gold_sql = """
+SELECT cast(pickup_at AS DATE) AS pickup_date, count(*) AS trip_count
+FROM trips
+WHERE pickup_at >= TIMESTAMP '2024-03-01'
+  AND pickup_at < TIMESTAMP '2024-04-01'
+  AND total_amount < 0
+GROUP BY pickup_date
+ORDER BY trip_count DESC
+LIMIT 5
+"""
+difficulty = "moderate"
+notes = "The fifth and sixth counts are 1569 and 1550, so there is no cutoff tie."
+
+[[questions]]
+id = "monthly-negative-total-percentage"
+question = "For each pickup month, return the month as YYYY-MM, the number of trips with total_amount < 0, and that number as a percentage of all trips picked up in that month. Round the percentage on a 0-100 scale to 2 decimal places."
+gold_sql = """
+SELECT strftime(pickup_at, '%Y-%m') AS pickup_month,
+       count(*) FILTER (WHERE total_amount < 0) AS negative_count,
+       round(100.0 * count(*) FILTER (WHERE total_amount < 0) / count(*), 2)
+         AS negative_percentage
+FROM trips
+GROUP BY pickup_month
+"""
+difficulty = "moderate"
+
+[[questions]]
+id = "monthly-component-total-mismatches"
+question = "For each pickup month (YYYY-MM), count trips where total_amount differs by more than one cent from fare_amount + extra + mta_tax + tip_amount + tolls_amount + improvement_surcharge + congestion_surcharge + airport_fee. Treat NULL components as zero. Convert each component and total_amount to integer cents by rounding 100 times its dollar value to the nearest integer, then add and compare in cents. Return only the month and mismatch count."
+gold_sql = """
+WITH amounts_in_cents AS (
+  SELECT strftime(pickup_at, '%Y-%m') AS pickup_month,
+         cast(round(total_amount * 100, 0) AS BIGINT) AS total_cents,
+         cast(round(coalesce(fare_amount, 0) * 100, 0) AS BIGINT)
+         + cast(round(coalesce(extra, 0) * 100, 0) AS BIGINT)
+         + cast(round(coalesce(mta_tax, 0) * 100, 0) AS BIGINT)
+         + cast(round(coalesce(tip_amount, 0) * 100, 0) AS BIGINT)
+         + cast(round(coalesce(tolls_amount, 0) * 100, 0) AS BIGINT)
+         + cast(round(coalesce(improvement_surcharge, 0) * 100, 0) AS BIGINT)
+         + cast(round(coalesce(congestion_surcharge, 0) * 100, 0) AS BIGINT)
+         + cast(round(coalesce(airport_fee, 0) * 100, 0) AS BIGINT) AS component_cents
+  FROM trips
+)
+SELECT pickup_month,
+       count(*) FILTER (WHERE abs(total_cents - component_cents) > 1) AS mismatch_count
+FROM amounts_in_cents
+GROUP BY pickup_month
+"""
+difficulty = "moderate"
+notes = "Integer-cent arithmetic avoids floating-point boundary differences. This tests the stated component formula, not a claim that every mismatch is an invalid trip."
+
+[[questions]]
+id = "monthly-airport-fee-incidence"
+question = "For each pickup month (YYYY-MM) and each airport pickup location, JFK 132 and LaGuardia 138, return the month, pickup location ID, and percentage of that month's pickups at that airport with airport_fee > 0. Use all pickups at that airport in the denominator, including NULL, zero, and negative airport_fee values. Round percentages on a 0-100 scale to 2 decimal places."
+gold_sql = """
+SELECT strftime(pickup_at, '%Y-%m') AS pickup_month, pickup_location_id,
+       round(100.0 * count(*) FILTER (WHERE airport_fee > 0) / count(*), 2)
+         AS positive_fee_percentage
+FROM trips
+WHERE pickup_location_id IN (132, 138)
+GROUP BY pickup_month, pickup_location_id
+"""
+difficulty = "moderate"
+notes = "NULL airport fees remain in the denominator and do not count as positive. Both airports have trips in all three months."
+
+[[questions]]
+id = "monthly-two-tip-percentage-definitions"
+question = "For card trips (payment_type = 1) with fare_amount > 0 and tip_amount >= 0, compare two tip percentages by pickup month. Return YYYY-MM, the arithmetic mean of each trip's 100 * tip_amount / fare_amount, and 100 * sum(tip_amount) / sum(fare_amount), in that order. Round both percentages to 2 decimal places."
+gold_sql = """
+SELECT strftime(pickup_at, '%Y-%m') AS pickup_month,
+       round(avg(100.0 * tip_amount / fare_amount), 2) AS mean_trip_tip_percentage,
+       round(100.0 * sum(tip_amount) / sum(fare_amount), 2) AS aggregate_tip_percentage
+FROM trips
+WHERE payment_type = 1 AND fare_amount > 0 AND tip_amount >= 0
+GROUP BY pickup_month
+"""
+difficulty = "moderate"
+notes = "The first metric weights trips equally; the second weights them by fare. Recorded cash tips are not part of this population."
+
+[[questions]]
+id = "over-24-hour-trips-by-vendor"
+question = "For each vendor with at least one trip whose dropoff_at is more than 24 elapsed hours after pickup_at, return the vendor_id, count of those trips, and longest duration among those trips in hours rounded to 2 decimal places."
+gold_sql = """
+SELECT vendor_id, count(*) AS trip_count,
+       round(max(epoch(dropoff_at - pickup_at)) / 3600.0, 2) AS maximum_hours
+FROM trips
+WHERE dropoff_at > pickup_at + INTERVAL '24 hours'
+GROUP BY vendor_id
+"""
+difficulty = "moderate"
+notes = "Crossing a calendar date alone is insufficient. Exactly 24 hours is excluded."
+
+[[questions]]
+id = "high-cost-brooklyn-origin-zones"
+question = "Among trips ending in Brooklyn according to zones, keep only fare_amount > 0 and total_amount > 0. Which pickup zones have at least 1000 such trips and an average total_amount greater than $50 before rounding? Return the pickup zone's location_id, zone name, eligible trip count, and average total_amount rounded to 2 decimal places."
+gold_sql = """
+SELECT p.location_id, p.zone, count(*) AS trip_count,
+       round(avg(t.total_amount), 2) AS mean_total
+FROM trips t
+JOIN zones p ON t.pickup_location_id = p.location_id
+JOIN zones d ON t.dropoff_location_id = d.location_id
+WHERE d.borough = 'Brooklyn' AND t.fare_amount > 0 AND t.total_amount > 0
+GROUP BY p.location_id, p.zone
+HAVING count(*) >= 1000 AND avg(t.total_amount) > 50
+"""
+difficulty = "moderate"
+notes = "Both the sample-size threshold and mean use only eligible Brooklyn-bound trips. No pickup borough restriction applies."
+
+# --- Challenging (10) ------------------------------------------------------
+
+[[questions]]
+id = "monthly-busiest-zone-within-borough"
+question = "For each pickup month and each borough label with pickups that month, find the pickup zone with the most trips within that borough and month. Include every zone tied for first. Return the month as YYYY-MM, borough, location_id, zone name, and trip count. Use all borough labels in zones."
+gold_sql = """
+WITH zone_counts AS (
+  SELECT strftime(t.pickup_at, '%Y-%m') AS pickup_month,
+         z.borough, z.location_id, z.zone, count(*) AS trip_count
+  FROM trips t
+  JOIN zones z ON t.pickup_location_id = z.location_id
+  GROUP BY pickup_month, z.borough, z.location_id, z.zone
+), ranked AS (
+  SELECT *, rank() OVER (
+    PARTITION BY pickup_month, borough ORDER BY trip_count DESC
+  ) AS position
+  FROM zone_counts
+)
+SELECT pickup_month, borough, location_id, zone, trip_count
+FROM ranked
+WHERE position = 1
+"""
+difficulty = "challenging"
+notes = "Rank within each month/borough, not across the whole city. Tied winners are retained."
+
+[[questions]]
+id = "daily-quarter-running-trip-count"
+question = "For every pickup calendar date from January 1 through March 31, 2024 inclusive, return the date as DATE, that day's trip count, and the cumulative trip count from January 1 through that date inclusive. The cumulative count must not reset at month boundaries."
+gold_sql = """
+WITH daily AS (
+  SELECT cast(pickup_at AS DATE) AS pickup_date, count(*) AS trip_count
+  FROM trips
+  WHERE pickup_at >= TIMESTAMP '2024-01-01'
+    AND pickup_at < TIMESTAMP '2024-04-01'
+  GROUP BY pickup_date
+)
+SELECT pickup_date, trip_count,
+       sum(trip_count) OVER (
+         ORDER BY pickup_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS cumulative_trip_count
+FROM daily
+"""
+difficulty = "challenging"
+notes = "Every calendar date in this quarter has trips. Aggregate by date before computing the cumulative count."
+
+[[questions]]
+id = "borough-month-over-month-growth"
+question = "For each of Manhattan, Brooklyn, Queens, Bronx, and Staten Island, compare pickup counts month over month. Return one row for February 2024 and one for March 2024 per borough, with YYYY-MM, borough, that month's pickup count, and percentage change from the previous month's count, rounded to 2 decimal places. Use January as February's baseline; compute 100 * (current - previous) / previous."
+gold_sql = """
+WITH monthly AS (
+  SELECT strftime(t.pickup_at, '%Y-%m') AS pickup_month, z.borough,
+         count(*) AS trip_count
+  FROM trips t
+  JOIN zones z ON t.pickup_location_id = z.location_id
+  WHERE t.pickup_at >= TIMESTAMP '2024-01-01'
+    AND t.pickup_at < TIMESTAMP '2024-04-01'
+    AND z.borough IN ('Manhattan', 'Brooklyn', 'Queens', 'Bronx', 'Staten Island')
+  GROUP BY pickup_month, z.borough
+), with_previous AS (
+  SELECT *, lag(trip_count) OVER (
+    PARTITION BY borough ORDER BY pickup_month
+  ) AS previous_count
+  FROM monthly
+)
+SELECT pickup_month, borough, trip_count,
+       round(100.0 * (trip_count - previous_count) / previous_count, 2) AS change_percentage
+FROM with_previous
+WHERE pickup_month IN ('2024-02', '2024-03')
+"""
+difficulty = "challenging"
+notes = "All five boroughs have positive counts in all three months. January must remain available until after lag is computed."
+
+[[questions]]
+id = "airport-top-destinations-with-ties"
+question = "Separately for JFK pickups (pickup_location_id 132) and LaGuardia pickups (138), find destination zones at the three highest distinct destination trip counts, including every tie at those counts. Return pickup location ID, dropoff location ID, destination zone name, trip count, and that destination's percentage of all trips from that pickup airport, rounded to 2 decimal places on a 0-100 scale. Use all trips and all destinations in each airport's denominator."
+gold_sql = """
+WITH destination_counts AS (
+  SELECT t.pickup_location_id, t.dropoff_location_id, z.zone,
+         count(*) AS trip_count
+  FROM trips t
+  JOIN zones z ON t.dropoff_location_id = z.location_id
+  WHERE t.pickup_location_id IN (132, 138)
+  GROUP BY t.pickup_location_id, t.dropoff_location_id, z.zone
+), ranked AS (
+  SELECT *, dense_rank() OVER (
+    PARTITION BY pickup_location_id ORDER BY trip_count DESC
+  ) AS position,
+  sum(trip_count) OVER (PARTITION BY pickup_location_id) AS airport_trip_count
+  FROM destination_counts
+)
+SELECT pickup_location_id, dropoff_location_id, zone, trip_count,
+       round(100.0 * trip_count / airport_trip_count, 2) AS destination_percentage
+FROM ranked
+WHERE position <= 3
+"""
+difficulty = "challenging"
+notes = "Three distinct count levels means dense_rank. Compute each airport's denominator before selecting its leading destinations."
+
+[[questions]]
+id = "pickup-zones-fastest-january-march-growth"
+question = "Which five pickup zones had the largest percentage growth in trip count from January to March 2024, considering only zones with at least 100 January pickups? Use pickup_at for both months and rank by the unrounded value of 100 * (March count - January count) / January count. Return location_id, zone name, January count, March count, and growth percentage rounded to 2 decimal places."
+gold_sql = """
+WITH counts AS (
+  SELECT pickup_location_id,
+         count(*) FILTER (
+           WHERE pickup_at >= TIMESTAMP '2024-01-01'
+             AND pickup_at < TIMESTAMP '2024-02-01'
+         ) AS january_count,
+         count(*) FILTER (
+           WHERE pickup_at >= TIMESTAMP '2024-03-01'
+             AND pickup_at < TIMESTAMP '2024-04-01'
+         ) AS march_count
+  FROM trips
+  GROUP BY pickup_location_id
+)
+SELECT z.location_id, z.zone, c.january_count, c.march_count,
+       round(100.0 * (c.march_count - c.january_count) / c.january_count, 2)
+         AS growth_percentage
+FROM counts c
+JOIN zones z ON c.pickup_location_id = z.location_id
+WHERE c.january_count >= 100
+ORDER BY 100.0 * (c.march_count - c.january_count) / c.january_count DESC
+LIMIT 5
+"""
+difficulty = "challenging"
+notes = "The fifth growth rate is about 105.32%, versus 101.89% for sixth, with no cutoff tie. January and March have equal calendar lengths."
+
+[[questions]]
+id = "march-seven-day-average-pickups"
+question = "For every pickup calendar date in March 2024, return the date as DATE and the trailing seven-calendar-day average of daily trip counts, rounded to 2 decimal places. Each window includes that date and the six preceding dates, including February dates where needed. Count a day with no trips as zero and always divide by seven."
+gold_sql = """
+WITH calendar AS (
+  SELECT cast(day_value AS DATE) AS pickup_date
+  FROM generate_series(
+    TIMESTAMP '2024-02-24', TIMESTAMP '2024-03-31', INTERVAL '1 day'
+  ) AS dates(day_value)
+), daily AS (
+  SELECT cast(pickup_at AS DATE) AS pickup_date, count(*) AS trip_count
+  FROM trips
+  WHERE pickup_at >= TIMESTAMP '2024-02-24'
+    AND pickup_at < TIMESTAMP '2024-04-01'
+  GROUP BY pickup_date
+), rolling AS (
+  SELECT c.pickup_date,
+         avg(coalesce(d.trip_count, 0)) OVER (
+           ORDER BY c.pickup_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+         ) AS seven_day_average
+  FROM calendar c
+  LEFT JOIN daily d ON c.pickup_date = d.pickup_date
+)
+SELECT pickup_date, round(seven_day_average, 2) AS seven_day_average
+FROM rolling
+WHERE pickup_date >= DATE '2024-03-01'
+"""
+difficulty = "challenging"
+notes = "Leap-year February 24 is six days before March 1. Filter to March after computing windows, not before."
+
+[[questions]]
+id = "manhattan-zones-covering-80-percent"
+question = "For January 2024 pickups in Manhattan according to zones, order pickup zones by decreasing trip count, breaking equal counts by increasing location_id. Take the shortest prefix of this ordering that accounts for at least 80% of all Manhattan pickups that month, including the zone that reaches the threshold. Return each selected location_id, zone name, trip count, and cumulative percentage of Manhattan pickups rounded to 2 decimal places on a 0-100 scale."
+gold_sql = """
+WITH counts AS (
+  SELECT z.location_id, z.zone, count(*) AS trip_count
+  FROM trips t
+  JOIN zones z ON t.pickup_location_id = z.location_id
+  WHERE z.borough = 'Manhattan'
+    AND t.pickup_at >= TIMESTAMP '2024-01-01'
+    AND t.pickup_at < TIMESTAMP '2024-02-01'
+  GROUP BY z.location_id, z.zone
+), cumulative AS (
+  SELECT *,
+         sum(trip_count) OVER (
+           ORDER BY trip_count DESC, location_id ASC
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+         ) AS cumulative_count,
+         sum(trip_count) OVER () AS total_count
+  FROM counts
+)
+SELECT location_id, zone, trip_count,
+       round(100.0 * cumulative_count / total_count, 2) AS cumulative_percentage
+FROM cumulative
+WHERE 100 * (cumulative_count - trip_count) < 80 * total_count
+"""
+difficulty = "challenging"
+notes = "Selection uses the unrounded cumulative counts and retains the threshold-crossing zone. Integer comparison avoids a rounded-percentage cutoff."
+
+[[questions]]
+id = "borough-net-inflow-ranking"
+question = "Across all trips, calculate pickup count and dropoff count independently for each of Manhattan, Brooklyn, Queens, Bronx, and Staten Island, using zones for each endpoint. Include trips whose other endpoint is outside these five boroughs. Return borough, pickup count, dropoff count, net inflow (dropoffs minus pickups), and rank by descending net inflow. Equal net inflows share a rank and leave gaps in subsequent ranks, as in 1, 1, 3."
+gold_sql = """
+WITH pickups AS (
+  SELECT z.borough, count(*) AS pickup_count
+  FROM trips t
+  JOIN zones z ON t.pickup_location_id = z.location_id
+  WHERE z.borough IN ('Manhattan', 'Brooklyn', 'Queens', 'Bronx', 'Staten Island')
+  GROUP BY z.borough
+), dropoffs AS (
+  SELECT z.borough, count(*) AS dropoff_count
+  FROM trips t
+  JOIN zones z ON t.dropoff_location_id = z.location_id
+  WHERE z.borough IN ('Manhattan', 'Brooklyn', 'Queens', 'Bronx', 'Staten Island')
+  GROUP BY z.borough
+), flows AS (
+  SELECT p.borough, p.pickup_count, d.dropoff_count,
+         cast(d.dropoff_count AS BIGINT) - cast(p.pickup_count AS BIGINT) AS net_inflow
+  FROM pickups p
+  JOIN dropoffs d ON p.borough = d.borough
+)
+SELECT borough, pickup_count, dropoff_count, net_inflow,
+       rank() OVER (ORDER BY net_inflow DESC) AS inflow_rank
+FROM flows
+"""
+difficulty = "challenging"
+notes = "Same-borough trips contribute to both counts and cancel in net inflow. Both endpoints must not be restricted to NYC before counting."
+
+[[questions]]
+id = "weekday-normalized-january-march-comparison"
+question = "Compare January and March 2024 pickup activity for each ISO weekday (Monday = 1 through Sunday = 7). For each weekday, average the daily pickup counts over all calendar dates of that weekday within each month, counting any date with no trips as zero. Return the weekday number, January mean daily count, March mean daily count, and percentage change 100 * (March mean - January mean) / January mean. Round all three non-integer results to 2 decimal places, calculating the change from unrounded means."
+gold_sql = """
+WITH calendar AS (
+  SELECT cast(day_value AS DATE) AS pickup_date
+  FROM generate_series(
+    TIMESTAMP '2024-01-01', TIMESTAMP '2024-03-31', INTERVAL '1 day'
+  ) AS dates(day_value)
+), daily AS (
+  SELECT cast(pickup_at AS DATE) AS pickup_date, count(*) AS trip_count
+  FROM trips
+  WHERE pickup_at >= TIMESTAMP '2024-01-01'
+    AND pickup_at < TIMESTAMP '2024-04-01'
+  GROUP BY pickup_date
+), weekday_means AS (
+  SELECT cast(extract(isodow FROM c.pickup_date) AS INTEGER) AS iso_weekday,
+         avg(coalesce(d.trip_count, 0)) FILTER (
+           WHERE extract(month FROM c.pickup_date) = 1
+         ) AS january_mean,
+         avg(coalesce(d.trip_count, 0)) FILTER (
+           WHERE extract(month FROM c.pickup_date) = 3
+         ) AS march_mean
+  FROM calendar c
+  LEFT JOIN daily d ON c.pickup_date = d.pickup_date
+  GROUP BY iso_weekday
+)
+SELECT iso_weekday, round(january_mean, 2) AS january_mean,
+       round(march_mean, 2) AS march_mean,
+       round(100.0 * (march_mean - january_mean) / january_mean, 2) AS change_percentage
+FROM weekday_means
+"""
+difficulty = "challenging"
+notes = "This compares mean trips per occurrence of a weekday, not monthly weekday totals; January and March have different weekday compositions."
+
+[[questions]]
+id = "zone-median-tip-above-overall"
+question = "Use only card trips (payment_type = 1) with fare_amount > 0 and tip_amount >= 0, and define each trip's tip percentage as 100 * tip_amount / fare_amount. Which pickup zones have at least 1000 eligible trips and a continuous median tip percentage at least 0.5 percentage points above the continuous median across all eligible trips in the database, including all pickup locations? Compare unrounded medians. Return location_id, zone name, eligible trip count, zone median percentage, and overall median percentage; round both medians to 2 decimal places."
+gold_sql = """
+WITH eligible AS (
+  SELECT pickup_location_id, 100.0 * tip_amount / fare_amount AS tip_percentage
+  FROM trips
+  WHERE payment_type = 1 AND fare_amount > 0 AND tip_amount >= 0
+), overall AS (
+  SELECT median(tip_percentage) AS overall_median
+  FROM eligible
+), zone_medians AS (
+  SELECT pickup_location_id, count(*) AS trip_count,
+         median(tip_percentage) AS zone_median
+  FROM eligible
+  GROUP BY pickup_location_id
+  HAVING count(*) >= 1000
+)
+SELECT z.location_id, z.zone, m.trip_count,
+       round(m.zone_median, 2) AS zone_median,
+       round(o.overall_median, 2) AS overall_median
+FROM zone_medians m
+JOIN zones z ON m.pickup_location_id = z.location_id
+CROSS JOIN overall o
+WHERE m.zone_median >= o.overall_median + 0.5
+"""
+difficulty = "challenging"
+notes = "The overall median is over individual eligible trips, including zones below the 1000-trip threshold and special location IDs. It is not the median of zone medians."

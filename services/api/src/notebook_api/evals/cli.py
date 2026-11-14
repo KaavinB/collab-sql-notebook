@@ -78,6 +78,7 @@ from notebook_api.evals.taxi import (
     TaxiTarget,
     check_gold_sql,
     default_taxi_wiring,
+    load_taxi_file,
     load_taxi_questions,
     scored_questions,
 )
@@ -531,7 +532,7 @@ def _prepare_taxi(
     source: dict[str, Any] | None,
 ) -> _Suite:
     path: Path = args.taxi_questions
-    every = load_taxi_questions(path)
+    every, written_by = load_taxi_file(path)
     config["taxi_questions_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     real = scored_questions(every)
     if source is not None:
@@ -562,6 +563,11 @@ def _prepare_taxi(
                 real, size=args.limit, seed=args.seed, key=key, stratum=lambda q: q.difficulty
             )
             selection += f", then a stratified pilot of {args.limit} (seed {args.seed})"
+    selection += (
+        f". Questions and gold SQL written by: {written_by}"
+        if written_by
+        else ". The file doesn't say who wrote the questions"
+    )
     config["ids"]["taxi"] = [q.id for q in real]
     return _Suite(
         questions=[q.to_eval_question() for q in real],

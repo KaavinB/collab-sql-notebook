@@ -43,6 +43,7 @@ _REQUIRED = ("id", "question", "gold_sql", "difficulty")
 MAX_QUESTION_CHARS = 2_000  # the same limit the API puts on a prompt
 MAX_NOTES_CHARS = 2_000
 MAX_QUESTIONS = 1_000
+MAX_WRITTEN_BY_CHARS = 200
 _MAX_FILE_BYTES = 2 * 1024 * 1024
 _FETCH_BATCH_ROWS = 1_000
 
@@ -74,6 +75,16 @@ class TaxiQuestion:
 
 def load_taxi_questions(path: Path) -> list[TaxiQuestion]:
     """Parse and check the file's structure (no database access)."""
+    return load_taxi_file(path)[0]
+
+
+def load_taxi_file(path: Path) -> tuple[list[TaxiQuestion], str | None]:
+    """The questions, and the file's optional top-level `written_by` (who wrote them).
+
+    Who wrote a custom benchmark matters to reading its score (a model
+    scored on questions it wrote itself isn't measured independently), so
+    the report shows it.
+    """
     try:
         if path.stat().st_size > _MAX_FILE_BYTES:
             raise TaxiQuestionsError(f"{path} is too large")
@@ -82,9 +93,18 @@ def load_taxi_questions(path: Path) -> list[TaxiQuestion]:
         raise TaxiQuestionsError(f"can't read {path}: {error.strerror}") from None
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
         raise TaxiQuestionsError(f"{path} is not valid TOML: {error}") from None
-    extra_top = set(data) - {"questions"}
+    extra_top = set(data) - {"questions", "written_by"}
     if extra_top:
         raise TaxiQuestionsError(f"unknown top-level keys: {', '.join(sorted(extra_top))}")
+    written_by = data.get("written_by")
+    if written_by is not None and (
+        not isinstance(written_by, str)
+        or not written_by.strip()
+        or len(written_by) > MAX_WRITTEN_BY_CHARS
+    ):
+        raise TaxiQuestionsError(
+            f"written_by must be a non-empty string of at most {MAX_WRITTEN_BY_CHARS} characters"
+        )
     entries = data.get("questions", [])
     if not isinstance(entries, list):
         raise TaxiQuestionsError("`questions` must be an array of tables ([[questions]])")
@@ -106,7 +126,7 @@ def load_taxi_questions(path: Path) -> list[TaxiQuestion]:
             )
         texts[normalized] = question.id
         questions.append(question)
-    return questions
+    return questions, written_by.strip() if written_by is not None else None
 
 
 def _parse_entry(entry: Any, index: int) -> TaxiQuestion:

@@ -1,5 +1,4 @@
 import json
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +26,8 @@ from tests.evals.helpers import (
 )
 from tests.evals.test_runner import ANSWERS
 
+TEMPLATE_END = "# --- Your questions go below this line"
+
 
 class Harness:
     def __init__(self, tmp_path: Path) -> None:
@@ -41,7 +42,10 @@ class Harness:
         self.clients: list[FakeModelClient] = []
         self.wiring: TaxiAIWiring | None = None
         self.taxi_questions = tmp_path / "taxi_questions.toml"
-        shutil.copy(DEFAULT_TAXI_QUESTIONS, self.taxi_questions)
+        # The shipped file's header and examples only: its real questions
+        # need the real taxi.duckdb, and these tests use a tiny stand-in.
+        template = DEFAULT_TAXI_QUESTIONS.read_text().split(TEMPLATE_END)[0]
+        self.taxi_questions.write_text(template + TEMPLATE_END + "\n")
         self.taxi_db = write_taxi_db(tmp_path / "taxi.duckdb")
         self.versions = {
             "sdk_version": "2.3.0",
@@ -221,6 +225,23 @@ def test_taxi_suite_runs_with_the_ai_wiring(h: Harness) -> None:
     stats = taxi["models"]["claude-haiku-5-5"]
     assert stats["scored"] == 2
     assert stats["accuracy"]["with_repair"]["successes"] == 1
+    # The report says who wrote the questions (the file's written_by).
+    assert "written by: Codex" in taxi["selection"]
+    report = (h.run_dir("t") / "report.md").read_text()
+    assert "written by: Codex" in report
+    assert "isn't comparable with the BIRD score" in report
+
+
+def test_a_taxi_file_without_its_authors_says_so(h: Harness) -> None:
+    write_taxi_questions(h.taxi_questions)
+    text = h.taxi_questions.read_text()
+    h.taxi_questions.write_text(
+        "\n".join(line for line in text.splitlines() if not line.startswith("written_by"))
+    )
+    h.wiring = FakeTaxiWiring()
+    assert h.run("--dry-run", "--suite", "taxi", "--run-id", "anon") == 0
+    taxi = json.loads((h.run_dir("anon") / "summary.json").read_text())["suites"]["taxi"]
+    assert "doesn't say who wrote the questions" in taxi["selection"]
 
 
 def test_the_taxi_wiring_is_closed_after_the_run(h: Harness) -> None:

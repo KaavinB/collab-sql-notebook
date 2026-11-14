@@ -12,6 +12,7 @@ from notebook_api.evals.taxi import (
     TaxiTarget,
     check_gold_sql,
     default_taxi_wiring,
+    load_taxi_file,
     load_taxi_questions,
     scored_questions,
 )
@@ -44,12 +45,17 @@ def write(tmp_path: Path, text: str) -> Path:
     return path
 
 
-def test_the_shipped_template_has_only_examples_that_run(executor: DuckDbExecutor) -> None:
+def test_the_shipped_file_has_its_examples_and_the_real_questions(
+    executor: DuckDbExecutor,
+) -> None:
     questions = load_taxi_questions(DEFAULT_TAXI_QUESTIONS)
-    assert [q.id for q in questions] == ["example-trips-per-borough", "example-average-tip-share"]
-    assert all(q.example for q in questions)
-    assert scored_questions(questions) == []
-    check_gold_sql(questions, executor)  # the examples' gold SQL runs on the real columns
+    examples = [q for q in questions if q.example]
+    assert [q.id for q in examples] == ["example-trips-per-borough", "example-average-tip-share"]
+    assert len(scored_questions(questions)) == 50
+    # The examples' gold SQL runs on the real column names (this tiny test
+    # database has only those; `pnpm eval check-taxi` runs every question's
+    # gold SQL on the real taxi.duckdb).
+    check_gold_sql(examples, executor)
 
 
 def test_loads_a_question(tmp_path: Path) -> None:
@@ -256,3 +262,32 @@ def test_a_schema_that_cannot_be_read_is_a_setup_error(
             await wiring.aclose()
 
     asyncio.run(go())
+
+
+def test_the_file_can_say_who_wrote_it(tmp_path: Path) -> None:
+    questions, written_by = load_taxi_file(write(tmp_path, 'written_by = " Someone "\n' + ONE))
+    assert written_by == "Someone" and len(questions) == 1
+    assert load_taxi_file(write(tmp_path, ONE))[1] is None
+    for bad in ('written_by = ""\n', "written_by = 3\n", f'written_by = "{"x" * 201}"\n'):
+        with pytest.raises(TaxiQuestionsError, match="written_by"):
+            load_taxi_file(write(tmp_path, bad + ONE))
+
+
+def test_the_shipped_file_names_who_wrote_it() -> None:
+    written_by = load_taxi_file(DEFAULT_TAXI_QUESTIONS)[1]
+    assert written_by is not None and "Codex" in written_by
+
+
+# The real dataset, when it has been built (`pnpm ingest`); not every
+# checkout has it, so this test skips without it.
+REAL_TAXI_DB = Path(__file__).resolve().parents[4] / "data" / "taxi.duckdb"
+
+
+@pytest.mark.skipif(not REAL_TAXI_DB.is_file(), reason="data/taxi.duckdb not built")
+def test_every_shipped_gold_query_runs_on_the_real_data() -> None:
+    questions = load_taxi_questions(DEFAULT_TAXI_QUESTIONS)
+    real = DuckDbExecutor(REAL_TAXI_DB, timeout_seconds=60, row_cap=1_000_000)
+    try:
+        check_gold_sql(questions, real)
+    finally:
+        real.close()

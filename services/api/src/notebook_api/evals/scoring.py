@@ -14,10 +14,17 @@ report too):
   and predicted results alike; BIRD's script would fail on it.
 - The per-query timeout and row cap are this harness's (recorded per run);
   BIRD's script stops queries after 30 s and has no row cap.
+- Numbers are compared by value, whatever their type: a DECIMAL 15.74
+  equals a DOUBLE 15.74. DuckDB returns DECIMAL for some casts and for
+  rounding written the Postgres way (`round(x::numeric, 2)`), and an answer
+  with the right numbers shouldn't be scored wrong for its type. (BIRD's
+  SQLite databases have no DECIMAL, so this changes nothing there.)
 """
 
 from dataclasses import dataclass
+from decimal import Decimal
 from math import sqrt
+from typing import Any
 
 from notebook_api.evals.execution import ExecOutcome
 
@@ -26,12 +33,26 @@ _Z95 = 1.959963984540054
 
 
 def is_correct(predicted: ExecOutcome, gold: ExecOutcome) -> bool:
-    return (
-        predicted.status == "ok"
-        and gold.status == "ok"
-        and predicted.rows is not None
-        and predicted.rows == gold.rows
-    )
+    if predicted.status != "ok" or gold.status != "ok":
+        return False
+    if predicted.rows is None or gold.rows is None:
+        return False
+    if predicted.rows == gold.rows:
+        return True
+    return _by_value(predicted.rows) == _by_value(gold.rows)
+
+
+def _by_value(rows: frozenset[Any]) -> frozenset[Any]:
+    """The rows with every DECIMAL as a float, so equal numbers compare equal."""
+    return frozenset(_number(row) for row in rows)
+
+
+def _number(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, tuple):
+        return tuple(_number(v) for v in value)
+    return value
 
 
 @dataclass(frozen=True)
